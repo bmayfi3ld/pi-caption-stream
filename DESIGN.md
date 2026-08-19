@@ -197,6 +197,7 @@ blank.
 | `GET /events` | SSE stream: `snapshot` on connect, then incremental events |
 | `GET /admin` | Metrics dashboard (no auth) |
 | `GET /api/stats` | JSON metrics snapshot |
+| `GET /logo` | Logo image, registered only when `--logo` is set |
 | `GET /healthz` | Liveness |
 
 SSE rather than WebSocket: traffic is strictly one-way, and `EventSource` gives automatic
@@ -215,9 +216,33 @@ Event wire format:
 Pages are `//go:embed`-ed so the binary ships standalone; `--dev-static` serves from disk while
 iterating.
 
-**Viewer** — bottom-anchored rolling window: recent finalized lines plus the live line, dimmer.
-Large high-contrast type sized in `vw` so one URL works on a phone, a projector, and as an OBS
-browser source. `?lines=`, `?size=`, `?debug=1` (overlays measured latency).
+**Viewer.** The page typesets itself instead of trusting the browser to wrap: one
+`CanvasRenderingContext2D` measures each candidate word against the row width before placing it.
+A browser reflow moves words the reader has already passed sideways and downward on every
+interim; measuring client-side and never re-wrapping avoids that class of motion entirely.
+
+A row closes on exactly two triggers — the next word doesn't fit, or the utterance ends — and both
+run the same freeze-and-glide path: the active row is marked frozen, a new row is appended below
+it, and the whole stack glides up by exactly one row height. The governing invariant: a word, once
+painted, never changes font, never moves sideways, and never moves down. It only ever moves up.
+
+State (`live` / `settled` / `stale`) is carried by **color only**, never by font — changing glyph
+metrics mid-word reflows text the reader is already reading. This replaced the old italic
+"pending" line. The trade-off: an interim can still retroactively rewrite earlier words in the
+open row, but once a word has scrolled into a frozen row it is never corrected — it is darkened
+(`stale`) instead, so a reader can see the recognizer disowned it without any layout moving.
+
+`computeMetrics()` calibrates canvas measurement against a hidden probe row's real rendered width,
+because canvas resolves a font stack independently of layout and an under-measure would clip a
+word rather than wrap it. `retypeset()`, debounced off `ResizeObserver` and `visualViewport`
+resize, is the only path that ever reflows text — everything else only appends. `?lines=` now
+means visible rows, not utterances.
+
+The phone is the primary viewer, so it sets the defaults rather than being an afterthought: type
+is larger in portrait (`4vw` is unreadable at phone widths), the visible row count is capped by
+what actually fits so a short landscape screen loses a row instead of clipping one, and the page
+takes a screen wake lock — a handset sleeping mid-event is the likeliest way this interface
+fails. The same URL still serves a projector and an OBS browser source.
 
 **Admin** — polls `/api/stats` once a second. Simpler than SSE for a single operator client.
 
@@ -269,8 +294,9 @@ event.
 ## 8. CLI
 
 `github.com/alecthomas/kong`. Struct tags declare env binding, enum validation, file-existence
-checks and grouped help, removing a page of hand-written validation. Subcommands rather than a
-`--source` flag, because replay and live take genuinely disjoint options.
+checks (`--logo`, like `replay`'s file argument) and grouped help, removing a page of hand-written
+validation. Subcommands rather than a `--source` flag, because replay and live take genuinely
+disjoint options.
 
 ```bash
 livecaption devices                              # find the soundboard

@@ -45,7 +45,8 @@ type STTFlags struct {
 // ServerFlags configure the caption web server.
 type ServerFlags struct {
 	Addr      string `default:":8080" group:"Server" help:"Listen address for the viewer and admin pages."`
-	Lines     int    `default:"3" group:"Server" help:"Caption lines visible on the viewer page."`
+	Lines     int    `default:"3" group:"Server" help:"Caption rows visible on the viewer page."`
+	Logo      string `type:"existingfile" group:"Server" help:"Image shown in the viewer's top-right corner."`
 	Open      bool   `group:"Server" help:"Open the viewer in a browser on start."`
 	DevStatic string `hidden:"" group:"Server" help:"Serve web assets from this directory instead of the embedded copy."`
 }

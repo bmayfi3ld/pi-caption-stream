@@ -52,6 +52,16 @@ func TestMissingFileIsRejected(t *testing.T) {
 	}
 }
 
+// TestMissingLogoIsRejected relies on kong's existingfile type, same as
+// TestMissingFileIsRejected, so a typo'd --logo path fails at parse time
+// rather than as a broken image mid-event.
+func TestMissingLogoIsRejected(t *testing.T) {
+	file := writeTempFile(t)
+	if _, _, err := Parse([]string{"replay", file, "--logo", "/does/not/exist"}); err == nil {
+		t.Error("expected a missing --logo file to be rejected")
+	}
+}
+
 func TestEnumsAreEnforced(t *testing.T) {
 	file := writeTempFile(t)
 	for _, args := range [][]string{

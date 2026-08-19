@@ -105,6 +105,7 @@ func newSession(ctx context.Context, o buildOpts, term *ui.Terminal, log *slog.L
 	srv, err := web.NewServer(web.Config{
 		Addr:      o.server.Addr,
 		Lines:     o.server.Lines,
+		Logo:      o.server.Logo,
 		Hub:       hub,
 		Metrics:   met,
 		Log:       log,
@@ -135,6 +136,9 @@ func newSession(ctx context.Context, o buildOpts, term *ui.Terminal, log *slog.L
 		fields = append(fields, ui.BannerField{Label: "transcript", Value: s.writer.Dir()})
 	} else {
 		fields = append(fields, ui.BannerField{Label: "transcript", Value: "disabled", Note: "--no-transcript"})
+	}
+	if o.server.Logo != "" {
+		fields = append(fields, ui.BannerField{Label: "logo", Value: o.server.Logo})
 	}
 	base := browserURL(o.server.Addr)
 	fields = append(fields,

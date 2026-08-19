@@ -88,14 +88,16 @@ with `--no-transcript`.
 
 The viewer page is served at the `--addr` you configured (default `http://localhost:8080/`). It's
 a bottom-anchored rolling caption window sized in `vw`, so the same URL works on a phone, a
-projector, or as an OBS browser source. Query parameters:
+projector, or as an OBS browser source. `--logo <file>` puts an image in the top-right corner
+beside the connection dot. Query parameters:
 
 | param | effect |
 |---|---|
-| `?lines=N` | number of caption lines shown (overrides `--lines`) |
+| `?lines=N` | number of caption rows shown (overrides `--lines`) |
 | `?size=N` | base font size in `vw` |
 | `?theme=light` | light theme (default is dark) |
 | `?debug=1` | overlays measured latency |
+| `?logo=0` | hides the logo (e.g. for OBS, where branding is composited downstream) |
 
 `/admin` is a metrics dashboard (no auth) polling `/api/stats` once a second — restarts, xruns,
 STT reconnects, SSE client counts, latency percentiles. Check it during an event to confirm

@@ -9,70 +9,118 @@
     --bg: #05070a;
     --fg: #f5f7fa;
     --dim: #7c8896;
-    --pending-op: 0.78;
+    --live: #93b4d8;
+    --stale: #3a4451;
     --warn: #f5a623;
     --bad: #ef4444;
-    --ok-dot: rgba(245, 247, 250, 0.28);
+    --ok: #22c55e;
     --size: 4vw;
+    --row-h: 1.6em;
   }
   :root[data-theme="light"] {
     --bg: #f4f5f7;
     --fg: #0c0f14;
     --dim: #6b7280;
-    --ok-dot: rgba(12, 15, 20, 0.22);
+    --live: #3b6ea5;
+    --stale: #aeb4bc;
+    --ok: #16a34a;
   }
 
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
+  html { height: 100dvh; }
   body {
+    height: 100dvh;
     background: var(--bg);
     color: var(--fg);
     font: 400 1rem/1.3 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     display: flex;
     flex-direction: column;
-    justify-content: flex-end;
     padding: 4vh 5vw calc(4vh + env(safe-area-inset-bottom, 0px)) 5vw;
     overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: manipulation;
+    -webkit-text-size-adjust: 100%;
+    user-select: none;
   }
 
-  #captions {
+  @media (orientation: portrait) {
+    :root { --size: 6.4vw; }
+  }
+
+  /* The caption area is bottom-anchored, fixed-height (#viewport) so a
+     partial row can never be visible, and only ever moves via the one-row
+     glide in JS (see freezeAndGlide). retypeset() is the only path that
+     ever rebuilds row contents. */
+  #page {
+    flex: 1;
+    min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.35em;
+    justify-content: flex-end;
+  }
+  #viewport {
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+  }
+  #stack {
+    display: flex;
+    flex-direction: column;
   }
 
-  .line {
-    font-size: clamp(1.4rem, var(--size), 7.5rem);
+  /* Row geometry is exact and identical whether a row is empty or full, so
+     the JS-measured --row-h always equals the glide's translate distance.
+     No gap between rows: spacing lives entirely in line-height. */
+  .row {
+    height: var(--row-h);
+    line-height: var(--row-h);
+    white-space: pre;
+    overflow: hidden;
     font-weight: 600;
-    line-height: 1.25;
-    text-wrap: balance;
-    overflow-wrap: break-word;
-    word-break: break-word;
-    color: var(--fg);
-  }
-  .line.old { color: var(--dim); }
-  .line.pending {
-    opacity: var(--pending-op);
-    font-style: italic;
-    font-weight: 500;
-  }
-  .line.enter {
-    animation: settle 0.22s ease-out;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .line.enter { animation: none; }
-  }
-  @keyframes settle {
-    from { opacity: 0; transform: translateY(0.2em); }
-    to   { opacity: 1; transform: translateY(0); }
+    font-size: clamp(1.35rem, var(--size), 7.5rem);
   }
 
-  /* Connection indicator: a quiet dot when healthy, a labeled pill when not.
-     Fixed in a top corner so it can never overlap the bottom-anchored text. */
-  #status {
+  /* Word state is color only. No rule here may touch font-style, font-weight,
+     font-size, font-family or letter-spacing between states — that would move
+     glyphs the reader is mid-way through, which is the bug this page fixes. */
+  .w { transition: color 180ms linear; }
+  .w.live { color: var(--live); }
+  .w.settled { color: var(--fg); }
+  .w.stale { color: var(--stale); }
+
+  /* Off-screen probe used only to read computed font metrics; never painted. */
+  .row-probe {
+    position: absolute;
+    left: -9999px;
+    top: 0;
+    visibility: hidden;
+    white-space: pre;
+    pointer-events: none;
+    font-weight: 600;
+    font-size: clamp(1.35rem, var(--size), 7.5rem);
+    line-height: 1.25;
+  }
+
+  #topbar {
     position: fixed;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
     top: max(0.9rem, env(safe-area-inset-top, 0px));
     right: max(0.9rem, env(safe-area-inset-right, 0px));
+    pointer-events: none;
+  }
+  #logo {
+    height: clamp(1.25rem, 3.4vh, 2.75rem);
+    max-width: 34vw;
+    object-fit: contain;
+    opacity: 0.92;
+  }
+
+  /* Connection indicator: a quiet dot when healthy, a labeled pill when not. */
+  #status {
     display: flex;
     align-items: center;
     gap: 0.5em;
@@ -84,22 +132,26 @@
     background: transparent;
     transition: background-color 0.25s, padding 0.25s;
     line-height: 1;
-    max-width: 60vw;
+    max-width: 50vw;
   }
   #status .dot {
     width: 0.6rem;
     height: 0.6rem;
     min-width: 0.6rem;
     border-radius: 50%;
-    background: var(--ok-dot);
-    transition: background-color 0.25s;
+    background: var(--ok);
+    box-shadow: 0 0 0 0.18rem color-mix(in srgb, var(--ok) 22%, transparent);
+    transition: background-color 0.25s, box-shadow 0.25s;
   }
   #status .label { display: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Initial tier, before EventSource.onopen has fired: a page must never
+     flash green before it actually knows it is connected. */
+  #status.connecting .dot { background: var(--dim); box-shadow: none; }
   #status.warn { background: color-mix(in srgb, var(--warn) 22%, transparent); padding: 0.3em 0.7em; }
-  #status.warn .dot { background: var(--warn); }
+  #status.warn .dot { background: var(--warn); box-shadow: none; }
   #status.warn .label { display: inline; color: var(--warn); }
   #status.bad { background: color-mix(in srgb, var(--bad) 22%, transparent); padding: 0.3em 0.7em; }
-  #status.bad .dot { background: var(--bad); }
+  #status.bad .dot { background: var(--bad); box-shadow: none; }
   #status.bad .label { display: inline; color: var(--bad); }
 
   #debug {
@@ -117,14 +169,22 @@
     max-width: 46vw;
   }
   #debug.on { display: block; }
-  #debug .row { display: flex; justify-content: space-between; gap: 1.5em; white-space: nowrap; }
+  /* Named .drow, not .row: .row is the caption typesetter's class and must
+     stay unambiguous so nothing outside the typesetter can affect its metrics. */
+  #debug .drow { display: flex; justify-content: space-between; gap: 1.5em; white-space: nowrap; }
   #debug .k { color: var(--dim); }
 </style>
 </head>
 <body>
-  <div id="status" role="status" aria-live="polite"><span class="dot"></span><span class="label"></span></div>
+  <div id="topbar">
+    <img id="logo" alt="" hidden>
+    <div id="status" class="connecting" role="status" aria-live="polite"><span class="dot"></span><span class="label"></span></div>
+  </div>
   <div id="debug"></div>
-  <div id="captions"></div>
+  <div id="page"><div id="viewport"><div id="stack"></div></div></div>
+  <!-- Long enough that the canvas-vs-layout width calibration in
+       computeMetrics() is not dominated by per-glyph rounding. -->
+  <div class="row-probe" id="probe" aria-hidden="true">The quick brown fox jumps over the lazy dog, 0123456789</div>
 
 <script>
 (function () {
@@ -142,56 +202,382 @@
     document.documentElement.style.setProperty("--size", sizeParam + "vw");
   }
 
-  var maxLines = Math.max(1, parseInt(params.get("lines"), 10) || 3);
+  var hasLinesParam = params.has("lines");
+  var linesParamNum = parseInt(params.get("lines"), 10);
+  var requestedLines = (!isNaN(linesParamNum) && linesParamNum > 0) ? linesParamNum : 3;
   var debugOn = params.get("debug") === "1";
 
-  var box = document.getElementById("captions");
+  var page = document.getElementById("page");
+  var viewport = document.getElementById("viewport");
+  var stack = document.getElementById("stack");
+  var probe = document.getElementById("probe");
+  var logoEl = document.getElementById("logo");
   var statusEl = document.getElementById("status");
   var statusLabel = statusEl.querySelector(".label");
   var debugEl = document.getElementById("debug");
 
-  var HISTORY_CAP = 200;
-  var finals = [];   // [{id, text}]
-  var pending = "";
-  var lastFinalId = null;
+  // ---- typesetter state ----
+  // ledger is the append-only record of every word ever painted (frozen
+  // entries are never touched again). The live tail — the words of the
+  // utterance still in progress — is the one exception: it may be truncated
+  // and re-pushed as revisions arrive, but only back to the first frozen
+  // word, which is immutable, full stop.
+  var ledger = [];          // [{text, state:"live"|"settled", stale, frozen, span, lastOfUtt}]
+  var uttStartIndex = 0;    // ledger index where the open utterance begins
+  var rows = [];            // [{el, words:[entry,...], frozen}], only the last is unfrozen
+  var staleCount = 0;       // debug-only: contradicted-frozen-word counter
+  var LEDGER_CAP = 4000;    // ~200 rows of headroom, mirrors the old 200-line cap
 
-  function render(newlyFinalId) {
-    box.replaceChildren();
-    var slots = pending ? maxLines - 1 : maxLines;
-    var shown = slots > 0 ? finals.slice(-slots) : [];
-    shown.forEach(function (line, i) {
-      var el = document.createElement("div");
-      var isNewest = !pending && i === shown.length - 1;
-      el.className = "line" + (isNewest ? "" : " old");
-      if (line.id && line.id === newlyFinalId) el.classList.add("enter");
-      el.textContent = line.text;
-      box.append(el);
-    });
-    if (pending) {
-      var el = document.createElement("div");
-      el.className = "line pending";
-      el.textContent = pending;
-      box.append(el);
+  var ctx = document.createElement("canvas").getContext("2d");
+  var rowH = 0;
+  var usableWidth = 0;
+  var fontScale = 1;
+  var maxRows = requestedLines;
+
+  function tokenize(text) {
+    var t = text.replace(/^\s+|\s+$/g, "");
+    return t ? t.split(/\s+/) : [];
+  }
+
+  function commonPrefixLen(a, b) {
+    var n = a.length < b.length ? a.length : b.length;
+    var i = 0;
+    while (i < n && a[i] === b[i]) i++;
+    return i;
+  }
+
+  function measureWidth(s) {
+    return ctx.measureText(s).width * fontScale;
+  }
+
+  function activeRow() {
+    return rows[rows.length - 1];
+  }
+
+  function rowText(row) {
+    var parts = [];
+    for (var i = 0; i < row.words.length; i++) parts.push(row.words[i].text);
+    return parts.join(" ");
+  }
+
+  function wordClass(entry) {
+    return "w " + (entry.stale ? "stale" : entry.state);
+  }
+
+  function placeInRow(row, entry) {
+    if (row.words.length) row.el.appendChild(document.createTextNode(" "));
+    var span = document.createElement("span");
+    span.className = wordClass(entry);
+    span.textContent = entry.text;
+    row.el.appendChild(span);
+    entry.span = span;
+    row.words.push(entry);
+  }
+
+  function removeFromActiveRow(entry) {
+    var row = activeRow();
+    row.words.pop();
+    if (entry.span && entry.span.parentNode) row.el.removeChild(entry.span);
+    if (row.words.length) {
+      var last = row.el.lastChild;
+      if (last && last.nodeType === 3) row.el.removeChild(last);
+    }
+    entry.span = null;
+  }
+
+  function applyRowOpacities() {
+    var n = rows.length;
+    var levels = [1, 0.85, 0.7];
+    for (var i = 0; i < n; i++) {
+      var age = n - 1 - i;
+      var op = age < levels.length ? levels[age] : 0.55;
+      rows[i].el.style.opacity = String(op);
     }
   }
 
-  // ---- default lines-count from /api/config, overridden by ?lines= ----
-  if (!params.has("lines")) {
-    fetch("/api/config").then(function (r) { return r.json(); }).then(function (cfg) {
-      if (cfg && cfg.lines > 0) { maxLines = cfg.lines; render(); }
-    }).catch(function () { /* fall back to default silently */ });
+  function makeEmptyRow() {
+    var d = document.createElement("div");
+    d.className = "row";
+    return { el: d, words: [], frozen: false };
   }
+
+  function trimRows() {
+    while (rows.length > maxRows + 1) {
+      var old = rows.shift();
+      if (old.el.parentNode) old.el.parentNode.removeChild(old.el);
+    }
+  }
+
+  function trimLedger() {
+    var over = ledger.length - LEDGER_CAP;
+    if (over > 0) {
+      ledger.splice(0, over);
+      uttStartIndex = Math.max(0, uttStartIndex - over);
+    }
+  }
+
+  // A row is closed by exactly two triggers — the next word doesn't fit
+  // (pushWord below), or the utterance ends (applyUtterance below) — and
+  // both call this single function. Skipping empty rows means a `final`
+  // landing right on a row boundary can never emit a blank row.
+  function freezeAndGlide(animate) {
+    var row = activeRow();
+    if (!row || row.words.length === 0) return;
+    row.frozen = true;
+    for (var i = 0; i < row.words.length; i++) row.words[i].frozen = true;
+
+    var next = makeEmptyRow();
+    stack.appendChild(next.el);
+    rows.push(next);
+    applyRowOpacities();
+
+    var reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (animate && !reduced) {
+      stack.style.transition = "none";
+      stack.style.transform = "translateY(" + rowH + "px)";
+      void stack.offsetHeight; // force reflow before the transition kicks in
+      stack.style.transition = "transform 200ms cubic-bezier(.22,.61,.36,1)";
+      stack.style.transform = "translateY(0)";
+    } else {
+      stack.style.transition = "none";
+      stack.style.transform = "translateY(0)";
+      trimRows();
+    }
+  }
+
+  stack.addEventListener("transitionend", function (e) {
+    if (e.target === stack && e.propertyName === "transform") trimRows();
+  });
+
+  // pushWord is the only way text reaches the screen.
+  function pushWord(text, state, animate) {
+    var row = activeRow();
+    var cand = row.words.length ? rowText(row) + " " + text : text;
+    if (measureWidth(cand) <= usableWidth) {
+      var entry = { text: text, state: state, stale: false, frozen: false, span: null, lastOfUtt: false };
+      ledger.push(entry);
+      placeInRow(row, entry);
+    } else {
+      freezeAndGlide(animate); // doesn't-fit trigger
+      row = activeRow();
+      if (measureWidth(text) > usableWidth) {
+        hardSplit(text, state, animate);
+      } else {
+        var e2 = { text: text, state: state, stale: false, frozen: false, span: null, lastOfUtt: false };
+        ledger.push(e2);
+        placeInRow(row, e2);
+      }
+    }
+    trimLedger();
+  }
+
+  // Rare case: a single "word" (URL, long compound) wider than the row.
+  // Split it into chunks that fit; each full chunk freezes its own row.
+  function hardSplit(word, state, animate) {
+    var i = 0;
+    while (i < word.length) {
+      var row = activeRow();
+      var end = i + 1;
+      while (end <= word.length && measureWidth(word.slice(i, end)) <= usableWidth) end++;
+      end = end - 1;
+      if (end <= i) end = i + 1; // guarantee progress even for an oversize glyph
+      var chunk = word.slice(i, end);
+      var entry = { text: chunk, state: state, stale: false, frozen: false, span: null, lastOfUtt: false };
+      ledger.push(entry);
+      placeInRow(row, entry);
+      i = end;
+      if (i < word.length) freezeAndGlide(animate);
+    }
+  }
+
+  // Handles both "interim" and "final" SSE kinds, which both carry the
+  // WHOLE current utterance text, never a delta (hub.go Publish). Diffs the
+  // incoming text against what is displayed: active-row words past the
+  // common prefix are removed and re-pushed; frozen words the revision
+  // contradicts stay exactly where they are and are re-tagged stale.
+  function applyUtterance(text, isFinal, animate) {
+    var newWords = tokenize(text);
+    var oldEntries = ledger.slice(uttStartIndex);
+    var oldWords = [];
+    var i;
+    for (i = 0; i < oldEntries.length; i++) oldWords.push(oldEntries[i].text);
+    var common = commonPrefixLen(oldWords, newWords);
+    var frozenCount = 0;
+    while (frozenCount < oldEntries.length && oldEntries[frozenCount].frozen) frozenCount++;
+    var keep = common > frozenCount ? common : frozenCount;
+
+    for (i = 0; i < frozenCount; i++) {
+      var fe = oldEntries[i];
+      var shouldBeStale = i >= common;
+      if (shouldBeStale && !fe.stale) {
+        fe.stale = true;
+        if (fe.span) fe.span.className = wordClass(fe);
+        staleCount++;
+      } else if (!shouldBeStale && fe.stale) {
+        fe.stale = false; // a later revision re-confirmed it
+        if (fe.span) fe.span.className = wordClass(fe);
+      }
+    }
+
+    var removeCount = oldEntries.length - keep; // always within the active row: keep >= frozenCount
+    for (i = 0; i < removeCount; i++) {
+      removeFromActiveRow(ledger.pop());
+    }
+
+    for (i = keep; i < newWords.length; i++) {
+      pushWord(newWords[i], "live", animate);
+    }
+
+    if (isFinal) {
+      for (i = uttStartIndex; i < ledger.length; i++) {
+        var e = ledger[i];
+        if (!e.stale && e.state === "live") {
+          e.state = "settled";
+          if (e.span) e.span.className = wordClass(e);
+        }
+      }
+      if (ledger.length > uttStartIndex) ledger[ledger.length - 1].lastOfUtt = true;
+      freezeAndGlide(animate); // utterance-ended trigger; no-ops if active row is empty
+      uttStartIndex = ledger.length;
+    }
+    trimLedger();
+  }
+
+  // Clears the ledger *and* the rows built from it. Both must go together:
+  // EventSource reconnects on its own and every reconnect delivers a fresh
+  // snapshot, so keeping the old rows would replay history on top of itself.
+  function resetAll() {
+    ledger = [];
+    uttStartIndex = 0;
+    staleCount = 0;
+    rebuild();
+  }
+
+  // ---- measurement & layout ----
+  function adjustMaxRows() {
+    var rh = rowH || 1;
+    var fitRows = Math.floor(page.clientHeight / rh) || 1;
+    maxRows = Math.max(1, Math.min(requestedLines, fitRows));
+    viewport.style.height = (maxRows * rowH) + "px";
+  }
+
+  function computeMetrics() {
+    var cs = getComputedStyle(probe);
+    ctx.font = cs.fontWeight + " " + cs.fontSize + " " + cs.fontFamily;
+    var box = probe.getBoundingClientRect();
+    var measuredH = Math.ceil(box.height);
+    if (measuredH > 0) {
+      rowH = measuredH;
+      document.documentElement.style.setProperty("--row-h", rowH + "px");
+    }
+    // Canvas resolves a font stack independently of layout — generic families
+    // like ui-sans-serif in particular often don't match — so calibrate
+    // against the real rendered probe. If canvas under-measures, a row that
+    // "fits" would be clipped by overflow:hidden instead of wrapping; the
+    // no-wrap invariant would survive but the reader would lose a word.
+    var canvasW = ctx.measureText(probe.textContent).width;
+    fontScale = (box.width > 0 && canvasW > 0) ? box.width / canvasW : 1;
+    usableWidth = Math.max(1, page.clientWidth - 1);
+    adjustMaxRows();
+  }
+
+  // Rebuilds rows from the ledger from scratch, animation suppressed. Used
+  // at startup, after a snapshot, and by retypeset(). This — plus the
+  // initial build — are the only places row DOM is created outside of
+  // pushWord/freezeAndGlide's normal live-streaming path.
+  function rebuild() {
+    stack.style.transition = "none";
+    stack.style.transform = "translateY(0)";
+    stack.replaceChildren();
+    rows = [];
+    var row = makeEmptyRow();
+    stack.appendChild(row.el);
+    rows.push(row);
+
+    for (var idx = 0; idx < ledger.length; idx++) {
+      var entry = ledger[idx];
+      entry.span = null;
+      entry.frozen = false;
+      row = activeRow();
+      var cand = row.words.length ? rowText(row) + " " + entry.text : entry.text;
+      var fits = row.words.length === 0 || measureWidth(cand) <= usableWidth;
+      if (!fits) {
+        row.frozen = true;
+        for (var k = 0; k < row.words.length; k++) row.words[k].frozen = true;
+        row = makeEmptyRow();
+        stack.appendChild(row.el);
+        rows.push(row);
+      }
+      placeInRow(row, entry);
+      if (entry.lastOfUtt) {
+        row.frozen = true;
+        for (var m = 0; m < row.words.length; m++) row.words[m].frozen = true;
+        row = makeEmptyRow();
+        stack.appendChild(row.el);
+        rows.push(row);
+      }
+    }
+    trimRows();
+    applyRowOpacities();
+  }
+
+  // retypeset() is the ONLY path that reflows text. It runs on resize and
+  // rotation, never mid-stream: nothing in the SSE handling below calls it.
+  function retypeset() {
+    computeMetrics();
+    rebuild();
+  }
+
+  var retypesetTimer = null;
+  function scheduleRetypeset() {
+    if (retypesetTimer) clearTimeout(retypesetTimer);
+    retypesetTimer = setTimeout(function () {
+      retypesetTimer = null;
+      retypeset();
+    }, 120);
+  }
+
+  computeMetrics();
+  rebuild();
+
+  if (window.ResizeObserver) {
+    new ResizeObserver(scheduleRetypeset).observe(page);
+  }
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", scheduleRetypeset);
+  }
+  window.addEventListener("orientationchange", scheduleRetypeset);
+
+  // ---- config: lines default (only when ?lines= is absent) and logo ----
+  fetch("/api/config").then(function (r) { return r.json(); }).then(function (cfg) {
+    if (!cfg) return;
+    if (!hasLinesParam && cfg.lines > 0) {
+      // Changing the visible row count doesn't touch font metrics or word
+      // wrap, so this is a cheap re-derive, not a full retypeset().
+      requestedLines = cfg.lines;
+      adjustMaxRows();
+      trimRows();
+    }
+    if (cfg.logo && params.get("logo") !== "0") {
+      logoEl.onerror = function () { logoEl.hidden = true; };
+      logoEl.src = cfg.logo;
+      logoEl.hidden = false;
+    }
+  }).catch(function () { /* fall back to default silently */ });
 
   // ---- connection indicator ----
   // Two signals feed it: the browser's own EventSource state (onopen/onerror),
   // and upstream "status" events the server relays about the STT link. The
-  // more severe of the two wins.
-  var sseOpen = false;
-  var hubState = null; // last status event's state, or null if none yet
+  // more severe of the two wins. sseOpen starts null ("connecting") so the
+  // dot cannot flash green before onopen actually fires.
+  var sseOpen = null;
+  var hubState = null;
 
   function applyIndicator() {
     var tier = "ok", text = "";
-    if (!sseOpen) {
+    if (sseOpen === null) {
+      tier = "connecting";
+    } else if (!sseOpen) {
       tier = "bad";
       text = "disconnected";
     } else if (hubState === "reconnecting" || hubState === "connecting") {
@@ -201,11 +587,13 @@
       tier = "bad";
       text = "closed";
     }
+    statusEl.classList.toggle("connecting", tier === "connecting");
     statusEl.classList.toggle("warn", tier === "warn");
     statusEl.classList.toggle("bad", tier === "bad");
     statusLabel.textContent = text;
   }
 
+  // SSE rather than WebSocket because the traffic is strictly one-way.
   var es = new EventSource("/events");
   es.onopen = function () { sseOpen = true; applyIndicator(); };
   es.onerror = function () {
@@ -215,31 +603,29 @@
   es.onmessage = function (e) {
     var ev;
     try { ev = JSON.parse(e.data); } catch (err) { return; }
-    var newlyFinalId = null;
     switch (ev.kind) {
       case "snapshot":
-        finals = ev.lines || [];
-        pending = ev.pending || "";
+        resetAll();
+        (ev.lines || []).forEach(function (line) {
+          applyUtterance(line.text || "", true, false);
+        });
+        applyUtterance(ev.pending || "", false, false);
         sseOpen = true;
         break;
       case "final":
-        finals.push({ id: ev.id, text: ev.text });
-        pending = "";
-        newlyFinalId = ev.id;
+        applyUtterance(ev.text || "", true, true);
         break;
       case "interim":
-        pending = ev.text || "";
+        applyUtterance(ev.text || "", false, true);
         break;
       case "status":
         hubState = ev.state || null;
         applyIndicator();
-        return; // no caption redraw needed
+        return;
       default:
         return;
     }
-    if (finals.length > HISTORY_CAP) finals = finals.slice(-HISTORY_CAP);
     applyIndicator();
-    render(newlyFinalId);
   };
 
   // ---- debug overlay: STT state + measured latency, polled from /api/stats ----
@@ -255,18 +641,28 @@
       }).then(function (s) {
         var stt = s.stt || {};
         debugEl.innerHTML =
-          '<div class="row"><span class="k">stt state</span><span>' + (stt.state || "—") + '</span></div>' +
-          '<div class="row"><span class="k">latency last</span><span>' + fmtMs(stt.latency_last_ms) + '</span></div>' +
-          '<div class="row"><span class="k">latency p50</span><span>' + fmtMs(stt.latency_p50_ms) + '</span></div>';
+          '<div class="drow"><span class="k">stt state</span><span>' + (stt.state || "—") + '</span></div>' +
+          '<div class="drow"><span class="k">latency last</span><span>' + fmtMs(stt.latency_last_ms) + '</span></div>' +
+          '<div class="drow"><span class="k">latency p50</span><span>' + fmtMs(stt.latency_p50_ms) + '</span></div>' +
+          '<div class="drow"><span class="k">stale words</span><span>' + staleCount + '</span></div>';
       }).catch(function () {
-        debugEl.innerHTML = '<div class="row"><span class="k">debug</span><span>stats unavailable</span></div>';
+        debugEl.innerHTML = '<div class="drow"><span class="k">debug</span><span>stats unavailable</span></div>';
       });
     };
     pollDebug();
     setInterval(pollDebug, 1000);
   }
 
-  render();
+  // ---- screen wake lock: a phone sleeping mid-event is the most likely
+  // real-world failure of this interface. Ignore failure silently. ----
+  function requestWakeLock() {
+    if (!navigator.wakeLock) return;
+    navigator.wakeLock.request("screen").catch(function () {});
+  }
+  requestWakeLock();
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") requestWakeLock();
+  });
 })();
 </script>
 </body>

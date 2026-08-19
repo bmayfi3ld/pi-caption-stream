@@ -202,6 +202,97 @@ func TestClientDisconnectCleansUpSubscription(t *testing.T) {
 	t.Errorf("sse_clients = %d after disconnect, want 0", m.SSEClients())
 }
 
+// TestLogoUnsetReturns404 makes sure an unconfigured logo falls through to
+// pageHandler's catch-all 404 rather than serving something unexpected.
+func TestLogoUnsetReturns404(t *testing.T) {
+	base, _, _ := startTestServer(t, newTestConfig())
+	resp, err := http.Get(base + "/logo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// TestLogoServedWithETagAndConditionalRequest covers the whole contract: a
+// configured logo is served with the right Content-Type and a stable ETag,
+// and a follow-up conditional request gets 304 rather than the body again.
+func TestLogoServedWithETagAndConditionalRequest(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.Logo = "testdata/logo.png"
+	base, _, _ := startTestServer(t, cfg)
+
+	resp, err := http.Get(base + "/logo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "image/png" {
+		t.Errorf("Content-Type = %q, want image/png", ct)
+	}
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		t.Fatal("ETag header is empty, want a value")
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) == 0 {
+		t.Error("logo body is empty, want image bytes")
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, base+"/logo", nil)
+	req.Header.Set("If-None-Match", etag)
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotModified {
+		t.Errorf("conditional status = %d, want 304", resp2.StatusCode)
+	}
+}
+
+// TestAPIConfigReportsLogoState covers both sides of the logo contract the
+// viewer relies on: "" unset, "/logo" set.
+func TestAPIConfigReportsLogoState(t *testing.T) {
+	base, _, _ := startTestServer(t, newTestConfig())
+	resp, err := http.Get(base + "/api/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["logo"] != "" {
+		t.Errorf(`logo = %v, want ""`, got["logo"])
+	}
+
+	cfg := newTestConfig()
+	cfg.Logo = "testdata/logo.png"
+	base2, _, _ := startTestServer(t, cfg)
+	resp2, err := http.Get(base2 + "/api/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	var got2 map[string]any
+	if err := json.NewDecoder(resp2.Body).Decode(&got2); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got2["logo"] != "/logo" {
+		t.Errorf(`logo = %v, want "/logo"`, got2["logo"])
+	}
+}
+
 // nextSSEData reads one "data: ..." payload from an SSE stream, skipping the
 // retry directive and ping comments that aren't a message.
 func nextSSEData(t *testing.T, r *bufio.Reader) string {
