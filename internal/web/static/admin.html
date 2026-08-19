@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>livecaption — admin</title>
+<style>
+  :root {
+    --bg: #f3f4f6;
+    --surface: #ffffff;
+    --surface-2: #f8f9fb;
+    --border: #e2e4e9;
+    --fg: #12151b;
+    --muted: #6b7280;
+    --accent: #0e7c86;
+    --accent-soft: #0e7c8618;
+    --ok: #1a9850;
+    --ok-soft: #1a985018;
+    --warn: #b8790a;
+    --warn-soft: #f5a62328;
+    --crit: #c22b2b;
+    --crit-soft: #ef444428;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0d11;
+      --surface: #14171d;
+      --surface-2: #191c23;
+      --border: #262a33;
+      --fg: #eef0f3;
+      --muted: #8a919e;
+      --accent: #4fd3dd;
+      --accent-soft: #4fd3dd1a;
+      --ok: #3ecf7e;
+      --ok-soft: #3ecf7e1c;
+      --warn: #f5a623;
+      --warn-soft: #f5a62324;
+      --crit: #f16565;
+      --crit-soft: #f165651f;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0b0d11; --surface: #14171d; --surface-2: #191c23; --border: #262a33;
+    --fg: #eef0f3; --muted: #8a919e; --accent: #4fd3dd; --accent-soft: #4fd3dd1a;
+    --ok: #3ecf7e; --ok-soft: #3ecf7e1c; --warn: #f5a623; --warn-soft: #f5a62324;
+    --crit: #f16565; --crit-soft: #f165651f;
+  }
+  :root[data-theme="light"] {
+    --bg: #f3f4f6; --surface: #ffffff; --surface-2: #f8f9fb; --border: #e2e4e9;
+    --fg: #12151b; --muted: #6b7280; --accent: #0e7c86; --accent-soft: #0e7c8618;
+    --ok: #1a9850; --ok-soft: #1a985018; --warn: #b8790a; --warn-soft: #f5a62328;
+    --crit: #c22b2b; --crit-soft: #ef444428;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 400 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    padding: 1.5rem clamp(1rem, 3vw, 2.5rem) 3rem;
+  }
+  .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+  h1, h2 { margin: 0; font-weight: 600; }
+  .eyebrow {
+    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  /* ---- top bar ---- */
+  #topbar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem 1.5rem;
+    padding-bottom: 1.1rem; margin-bottom: 1.25rem; border-bottom: 1px solid var(--border);
+  }
+  #topbar h1 { font-size: 1.2rem; }
+  #health {
+    display: inline-flex; align-items: center; gap: 0.5em;
+    padding: 0.3em 0.85em; border-radius: 999px; font-weight: 700; font-size: 0.8rem;
+    letter-spacing: 0.02em; text-transform: uppercase;
+  }
+  #health .dot { width: 0.55em; height: 0.55em; border-radius: 50%; }
+  #health.ok { background: var(--ok-soft); color: var(--ok); }
+  #health.ok .dot { background: var(--ok); }
+  #health.warn { background: var(--warn-soft); color: var(--warn); }
+  #health.warn .dot { background: var(--warn); }
+  #health.crit { background: var(--crit-soft); color: var(--crit); }
+  #health.crit .dot { background: var(--crit); }
+  .meta-group { display: flex; gap: 1.25rem; flex-wrap: wrap; margin-left: auto; }
+  .meta { display: flex; flex-direction: column; gap: 0.1rem; }
+  .meta .k { font-size: 0.68rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .meta .v { font-size: 0.92rem; font-weight: 600; }
+
+  #offline {
+    display: none; align-items: center; gap: 0.6em;
+    background: var(--crit-soft); color: var(--crit); border: 1px solid color-mix(in srgb, var(--crit) 35%, transparent);
+    padding: 0.7em 1em; border-radius: 0.5rem; margin-bottom: 1.25rem; font-weight: 600;
+  }
+  #offline.show { display: flex; }
+
+  /* ---- latency hero ---- */
+  #latency {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr)) minmax(10rem, 1.6fr);
+    gap: 1.5rem; align-items: end;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 0.75rem;
+    padding: 1.1rem 1.4rem; margin-bottom: 1.25rem;
+  }
+  .lat-stat .k { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .lat-stat .v { font-size: 1.7rem; font-weight: 700; line-height: 1.15; }
+  .lat-stat.hero .v { font-size: 2.3rem; color: var(--accent); }
+  #spark-wrap { min-width: 0; }
+  #spark-wrap .k { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.35rem; }
+  #spark { width: 100%; height: 3.2rem; display: block; }
+
+  /* ---- card grid ---- */
+  #grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 1rem; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 0.75rem;
+    padding: 1rem 1.1rem 1.1rem;
+  }
+  .card.dim { opacity: 0.55; }
+  .card h2 { font-size: 0.95rem; margin-bottom: 0.7rem; }
+  .row {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
+    padding: 0.28rem 0; border-bottom: 1px dashed var(--border);
+  }
+  .row:last-child { border-bottom: none; }
+  .row .k { color: var(--muted); font-size: 0.82rem; }
+  .row .v { font-weight: 600; text-align: right; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 0.35em;
+    padding: 0.1em 0.55em; border-radius: 999px; font-weight: 700;
+  }
+  .chip.warn { background: var(--warn-soft); color: var(--warn); }
+  .chip.warn::before { content: "\26A0"; font-size: 0.85em; }
+  .progress {
+    height: 0.4rem; border-radius: 999px; background: var(--surface-2); overflow: hidden; margin-top: 0.5rem;
+  }
+  .progress > i { display: block; height: 100%; background: var(--accent); }
+  .diag {
+    margin-top: 0.6rem; padding: 0.5rem 0.6rem; border-radius: 0.4rem;
+    background: var(--surface-2); border: 1px solid var(--border);
+    font: 500 0.78rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--muted); word-break: break-word; white-space: pre-wrap;
+  }
+  .diag.err { background: var(--crit-soft); color: var(--crit); border-color: color-mix(in srgb, var(--crit) 35%, transparent); }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <h1>livecaption <span style="color:var(--muted); font-weight:400;">— admin</span></h1>
+  <div id="health" class="ok"><span class="dot"></span><span id="health-label">loading</span></div>
+  <div class="meta-group">
+    <div class="meta"><span class="k">Uptime</span><span class="v num" id="m-uptime">—</span></div>
+    <div class="meta"><span class="k">Session</span><span class="v num" id="m-session">—</span></div>
+    <div class="meta"><span class="k">Version</span><span class="v num" id="m-version">—</span></div>
+    <div class="meta"><span class="k">Updated</span><span class="v num" id="m-updated">—</span></div>
+  </div>
+</div>
+
+<div id="offline"><span>&#9888;</span><span id="offline-text">stats unavailable — server may have exited</span></div>
+
+<div id="latency">
+  <div class="lat-stat hero"><div class="k">Latency (last)</div><div class="v num" id="lat-last">—</div></div>
+  <div class="lat-stat"><div class="k">p50</div><div class="v num" id="lat-p50">—</div></div>
+  <div class="lat-stat"><div class="k">p95</div><div class="v num" id="lat-p95">—</div></div>
+  <div class="lat-stat"><div class="k">max</div><div class="v num" id="lat-max">—</div></div>
+  <div id="spark-wrap">
+    <div class="k">Trend (last / polled 1&#8203;s)</div>
+    <svg id="spark" viewBox="0 0 300 48" preserveAspectRatio="none"></svg>
+  </div>
+</div>
+
+<div id="grid">
+
+  <div class="card" id="card-source">
+    <h2><span class="eyebrow">Source</span></h2>
+    <div class="row"><span class="k">Kind</span><span class="v num" id="src-kind">—</span></div>
+    <div class="row"><span class="k">Spec</span><span class="v num" id="src-spec">—</span></div>
+    <div class="row"><span class="k">Format</span><span class="v num" id="src-format">—</span></div>
+    <div class="row"><span class="k">Frames</span><span class="v num" id="src-frames">—</span></div>
+    <div class="row"><span class="k">Audio received</span><span class="v num" id="src-bytes">—</span></div>
+    <div class="row"><span class="k">Media processed</span><span class="v num" id="src-seconds">—</span></div>
+    <div id="src-progress-wrap" style="display:none">
+      <div class="progress"><i id="src-progress" style="width:0%"></i></div>
+    </div>
+    <div class="row"><span class="k">Frames dropped</span><span class="v num" id="src-dropped">—</span></div>
+    <div class="row"><span class="k">ffmpeg restarts</span><span class="v num" id="src-restarts">—</span></div>
+    <div class="row"><span class="k">Xruns</span><span class="v num" id="src-xruns">—</span></div>
+    <div class="diag err" id="src-stderr" style="display:none"></div>
+  </div>
+
+  <div class="card" id="card-monitor">
+    <h2><span class="eyebrow">Monitor</span></h2>
+    <div class="row"><span class="k">Device</span><span class="v num" id="mon-device">—</span></div>
+    <div class="row"><span class="k">Buffer</span><span class="v num" id="mon-buffer">—</span></div>
+    <div class="row"><span class="k">Playback</span><span class="v num" id="mon-alive">—</span></div>
+    <div class="row"><span class="k">Frames dropped</span><span class="v num" id="mon-dropped">—</span></div>
+  </div>
+
+  <div class="card" id="card-stt">
+    <h2><span class="eyebrow">STT</span></h2>
+    <div class="row"><span class="k">Engine</span><span class="v num" id="stt-engine">—</span></div>
+    <div class="row"><span class="k">State</span><span class="v num" id="stt-state">—</span></div>
+    <div class="row"><span class="k">Interim / final</span><span class="v num" id="stt-counts">—</span></div>
+    <div class="row"><span class="k">Audio sent</span><span class="v num" id="stt-sent">—</span></div>
+    <div class="row"><span class="k">Reconnects</span><span class="v num" id="stt-reconnects">—</span></div>
+    <div class="diag err" id="stt-error" style="display:none"></div>
+  </div>
+
+  <div class="card" id="card-web">
+    <h2><span class="eyebrow">Web</span></h2>
+    <div class="row"><span class="k">Viewers now</span><span class="v num" id="web-clients">—</span></div>
+    <div class="row"><span class="k">Viewers total</span><span class="v num" id="web-clients-total">—</span></div>
+    <div class="row"><span class="k">Events sent</span><span class="v num" id="web-events">—</span></div>
+    <div class="row"><span class="k">Slow disconnects</span><span class="v num" id="web-slowdrops">—</span></div>
+  </div>
+
+  <div class="card" id="card-transcript">
+    <h2><span class="eyebrow">Transcript</span></h2>
+    <div class="row"><span class="k">Path</span><span class="v num" id="tr-path">—</span></div>
+    <div class="row"><span class="k">Lines written</span><span class="v num" id="tr-lines">—</span></div>
+    <div class="row"><span class="k">Bytes written</span><span class="v num" id="tr-bytes">—</span></div>
+    <div class="diag err" id="tr-error" style="display:none"></div>
+  </div>
+
+  <div class="card" id="card-process">
+    <h2><span class="eyebrow">Process</span></h2>
+    <div class="row"><span class="k">Version</span><span class="v num" id="proc-version">—</span></div>
+    <div class="row"><span class="k">Session ID</span><span class="v num" id="proc-session">—</span></div>
+    <div class="row"><span class="k">Started</span><span class="v num" id="proc-started">—</span></div>
+    <div class="row"><span class="k">Uptime</span><span class="v num" id="proc-uptime">—</span></div>
+    <div class="row"><span class="k">Goroutines</span><span class="v num" id="proc-goroutines">—</span></div>
+  </div>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var WARN_FIELDS = [
+    ["source", "frames_dropped_total"],
+    ["source", "ffmpeg_restarts_total"],
+    ["source", "xruns_total"],
+    ["monitor", "frames_dropped_total"],
+    ["stt", "reconnects_total"],
+    ["web", "slow_disconnects_total"],
+  ];
+
+  function fmtInt(n) {
+    if (typeof n !== "number" || isNaN(n)) return "—";
+    return n.toLocaleString();
+  }
+
+  function fmtMs(v) {
+    if (typeof v !== "number" || isNaN(v)) return "—";
+    return Math.round(v).toLocaleString() + " ms";
+  }
+
+  function fmtBytes(n) {
+    if (typeof n !== "number" || isNaN(n)) return "—";
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB";
+    return (n / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+  }
+
+  // Seconds -> mm:ss, or h:mm:ss once past an hour.
+  function fmtClock(totalSeconds) {
+    if (typeof totalSeconds !== "number" || isNaN(totalSeconds) || totalSeconds < 0) return "—";
+    var s = Math.floor(totalSeconds);
+    var h = Math.floor(s / 3600);
+    var m = Math.floor((s % 3600) / 60);
+    var sec = s % 60;
+    var pad = function (x) { return String(x).padStart(2, "0"); };
+    return h > 0 ? h + ":" + pad(m) + ":" + pad(sec) : m + ":" + pad(sec);
+  }
+
+  // Uptime as a readable duration ("2h 14m", "48s"), for the top bar / process card.
+  function fmtDuration(totalSeconds) {
+    if (typeof totalSeconds !== "number" || isNaN(totalSeconds) || totalSeconds < 0) return "—";
+    var s = Math.floor(totalSeconds);
+    var h = Math.floor(s / 3600);
+    var m = Math.floor((s % 3600) / 60);
+    var sec = s % 60;
+    if (h > 0) return h + "h " + m + "m";
+    if (m > 0) return m + "m " + sec + "s";
+    return sec + "s";
+  }
+
+  function setChip(id, value, warnWhenNonzero) {
+    var el = document.getElementById(id);
+    var n = typeof value === "number" ? value : 0;
+    if (warnWhenNonzero && n !== 0) {
+      el.innerHTML = '<span class="chip warn">' + fmtInt(n) + "</span>";
+    } else {
+      el.textContent = fmtInt(n);
+    }
+  }
+
+  function setText(id, text) {
+    document.getElementById(id).textContent = text;
+  }
+
+  function setDiag(id, text) {
+    var el = document.getElementById(id);
+    if (text) {
+      el.style.display = "block";
+      el.textContent = text;
+    } else {
+      el.style.display = "none";
+    }
+  }
+
+  // ---- latency sparkline: client-accumulated from polled latency_last_ms ----
+  var SPARK_CAP = 90;
+  var sparkHistory = [];
+  var sparkEl = document.getElementById("spark");
+
+  function drawSpark() {
+    if (sparkHistory.length < 2) {
+      sparkEl.innerHTML = "";
+      return;
+    }
+    var w = 300, h = 48, pad = 4;
+    var max = Math.max.apply(null, sparkHistory);
+    var min = Math.min.apply(null, sparkHistory);
+    if (max === min) { max = max + 1; min = Math.max(0, min - 1); }
+    var n = sparkHistory.length;
+    var pts = sparkHistory.map(function (v, i) {
+      var x = pad + (i / (n - 1)) * (w - pad * 2);
+      var y = h - pad - ((v - min) / (max - min)) * (h - pad * 2);
+      return [x, y];
+    });
+    var line = pts.map(function (p, i) { return (i === 0 ? "M" : "L") + p[0].toFixed(1) + "," + p[1].toFixed(1); }).join(" ");
+    var area = line + " L" + pts[pts.length - 1][0].toFixed(1) + "," + (h - pad) +
+               " L" + pts[0][0].toFixed(1) + "," + (h - pad) + " Z";
+    var last = pts[pts.length - 1];
+    var accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+    sparkEl.innerHTML =
+      '<path d="' + area + '" fill="' + accent + '" fill-opacity="0.14" stroke="none"></path>' +
+      '<path d="' + line + '" fill="none" stroke="' + accent + '" stroke-width="1.75" stroke-linejoin="round" stroke-linecap="round"></path>' +
+      '<circle cx="' + last[0].toFixed(1) + '" cy="' + last[1].toFixed(1) + '" r="2.6" fill="' + accent + '"></circle>';
+  }
+
+  function getPath(obj, path) {
+    return path.split(".").reduce(function (o, k) { return o && (k in o) ? o[k] : undefined; }, obj);
+  }
+
+  function render(s) {
+    document.getElementById("offline").classList.remove("show");
+
+    // ---- health ----
+    var warnCount = WARN_FIELDS.reduce(function (acc, f) {
+      var v = getPath(s, f[0] + "." + f[1]);
+      return acc + (typeof v === "number" && v !== 0 ? 1 : 0);
+    }, 0);
+    var transcriptErr = s.transcript && s.transcript.last_write_error;
+    var healthEl = document.getElementById("health");
+    var healthLabel = document.getElementById("health-label");
+    if (warnCount === 0 && !transcriptErr) {
+      healthEl.className = "ok";
+      healthLabel.textContent = "Clean";
+    } else {
+      healthEl.className = "warn";
+      healthLabel.textContent = "Degraded";
+    }
+
+    setText("m-uptime", fmtDuration(s.uptime_sec));
+    setText("m-session", s.session_id || "—");
+    setText("m-version", s.version || "—");
+    setText("m-updated", "just now");
+
+    // ---- latency hero + sparkline ----
+    var stt = s.stt || {};
+    setText("lat-last", fmtMs(stt.latency_last_ms));
+    setText("lat-p50", fmtMs(stt.latency_p50_ms));
+    setText("lat-p95", fmtMs(stt.latency_p95_ms));
+    setText("lat-max", fmtMs(stt.latency_max_ms));
+    if (typeof stt.latency_last_ms === "number") {
+      sparkHistory.push(stt.latency_last_ms);
+      if (sparkHistory.length > SPARK_CAP) sparkHistory.shift();
+    }
+    drawSpark();
+
+    // ---- source ----
+    var src = s.source || {};
+    setText("src-kind", src.kind || "—");
+    setText("src-spec", src.spec || "—");
+    setText("src-format", src.format || "—");
+    setText("src-frames", fmtInt(src.frames_total));
+    setText("src-bytes", fmtBytes(src.bytes_total));
+    if (src.total_seconds > 0) {
+      setText("src-seconds", fmtClock(src.seconds_total) + " / " + fmtClock(src.total_seconds));
+      var wrap = document.getElementById("src-progress-wrap");
+      wrap.style.display = "block";
+      var pct = Math.min(100, (src.seconds_total / src.total_seconds) * 100);
+      document.getElementById("src-progress").style.width = pct.toFixed(1) + "%";
+    } else {
+      setText("src-seconds", fmtClock(src.seconds_total));
+      document.getElementById("src-progress-wrap").style.display = "none";
+    }
+    setChip("src-dropped", src.frames_dropped_total, true);
+    setChip("src-restarts", src.ffmpeg_restarts_total, true);
+    setChip("src-xruns", src.xruns_total, true);
+    setDiag("src-stderr", src.ffmpeg_last_stderr || "");
+
+    // ---- monitor ----
+    var mon = s.monitor || {};
+    var monCard = document.getElementById("card-monitor");
+    if (!mon.enabled) {
+      monCard.classList.add("dim");
+    } else {
+      monCard.classList.remove("dim");
+    }
+    setText("mon-device", mon.device || "—");
+    setText("mon-buffer", mon.enabled ? mon.buffer_ms + " ms" : "—");
+    setText("mon-alive", mon.enabled ? (mon.alive ? "playing" : "stopped") : "disabled");
+    setChip("mon-dropped", mon.frames_dropped_total, true);
+
+    // ---- stt ----
+    setText("stt-engine", stt.engine || "—");
+    setText("stt-state", stt.state || "—");
+    setText("stt-counts", fmtInt(stt.interim_total) + " / " + fmtInt(stt.final_total));
+    setText("stt-sent", fmtBytes(stt.bytes_sent_total));
+    setChip("stt-reconnects", stt.reconnects_total, true);
+    var sttErrText = stt.last_error ? stt.last_error + (stt.last_error_at ? "  (" + stt.last_error_at + ")" : "") : "";
+    setDiag("stt-error", sttErrText);
+
+    // ---- web ----
+    var web = s.web || {};
+    setText("web-clients", fmtInt(web.sse_clients));
+    setText("web-clients-total", fmtInt(web.sse_clients_total));
+    setText("web-events", fmtInt(web.events_total));
+    setChip("web-slowdrops", web.slow_disconnects_total, true);
+
+    // ---- transcript ----
+    var tr = s.transcript || {};
+    setText("tr-path", tr.path || "—");
+    setText("tr-lines", fmtInt(tr.lines_written));
+    setText("tr-bytes", fmtBytes(tr.bytes_written));
+    setDiag("tr-error", tr.last_write_error || "");
+    var trCard = document.getElementById("card-transcript");
+    if (tr.last_write_error) { trCard.classList.add("dim"); trCard.classList.remove("dim"); }
+
+    // ---- process ----
+    setText("proc-version", s.version || "—");
+    setText("proc-session", s.session_id || "—");
+    setText("proc-started", s.started_at ? new Date(s.started_at).toLocaleString() : "—");
+    setText("proc-uptime", fmtDuration(s.uptime_sec));
+    setText("proc-goroutines", fmtInt(s.goroutines));
+  }
+
+  var lastOkAt = null;
+  function tick() {
+    fetch("/api/stats").then(function (r) {
+      if (!r.ok) throw new Error("http " + r.status);
+      return r.json();
+    }).then(function (s) {
+      lastOkAt = Date.now();
+      render(s);
+    }).catch(function () {
+      var offline = document.getElementById("offline");
+      offline.classList.add("show");
+      var suffix = lastOkAt ? " (last update " + Math.round((Date.now() - lastOkAt) / 1000) + "s ago)" : "";
+      document.getElementById("offline-text").textContent = "stats unavailable — server may have exited" + suffix;
+      var healthEl = document.getElementById("health");
+      healthEl.className = "crit";
+      document.getElementById("health-label").textContent = "Offline";
+    });
+  }
+
+  tick();
+  setInterval(tick, 1000);
+})();
+</script>
+</body>
+</html>

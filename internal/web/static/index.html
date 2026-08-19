@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Live Captions</title>
+<style>
+  :root {
+    --bg: #05070a;
+    --fg: #f5f7fa;
+    --dim: #7c8896;
+    --pending-op: 0.78;
+    --warn: #f5a623;
+    --bad: #ef4444;
+    --ok-dot: rgba(245, 247, 250, 0.28);
+    --size: 4vw;
+  }
+  :root[data-theme="light"] {
+    --bg: #f4f5f7;
+    --fg: #0c0f14;
+    --dim: #6b7280;
+    --ok-dot: rgba(12, 15, 20, 0.22);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 400 1rem/1.3 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: 4vh 5vw calc(4vh + env(safe-area-inset-bottom, 0px)) 5vw;
+    overflow: hidden;
+  }
+
+  #captions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35em;
+  }
+
+  .line {
+    font-size: clamp(1.4rem, var(--size), 7.5rem);
+    font-weight: 600;
+    line-height: 1.25;
+    text-wrap: balance;
+    overflow-wrap: break-word;
+    word-break: break-word;
+    color: var(--fg);
+  }
+  .line.old { color: var(--dim); }
+  .line.pending {
+    opacity: var(--pending-op);
+    font-style: italic;
+    font-weight: 500;
+  }
+  .line.enter {
+    animation: settle 0.22s ease-out;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .line.enter { animation: none; }
+  }
+  @keyframes settle {
+    from { opacity: 0; transform: translateY(0.2em); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Connection indicator: a quiet dot when healthy, a labeled pill when not.
+     Fixed in a top corner so it can never overlap the bottom-anchored text. */
+  #status {
+    position: fixed;
+    top: max(0.9rem, env(safe-area-inset-top, 0px));
+    right: max(0.9rem, env(safe-area-inset-right, 0px));
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    padding: 0.3em 0.3em;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--fg);
+    background: transparent;
+    transition: background-color 0.25s, padding 0.25s;
+    line-height: 1;
+    max-width: 60vw;
+  }
+  #status .dot {
+    width: 0.6rem;
+    height: 0.6rem;
+    min-width: 0.6rem;
+    border-radius: 50%;
+    background: var(--ok-dot);
+    transition: background-color 0.25s;
+  }
+  #status .label { display: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #status.warn { background: color-mix(in srgb, var(--warn) 22%, transparent); padding: 0.3em 0.7em; }
+  #status.warn .dot { background: var(--warn); }
+  #status.warn .label { display: inline; color: var(--warn); }
+  #status.bad { background: color-mix(in srgb, var(--bad) 22%, transparent); padding: 0.3em 0.7em; }
+  #status.bad .dot { background: var(--bad); }
+  #status.bad .label { display: inline; color: var(--bad); }
+
+  #debug {
+    position: fixed;
+    top: max(0.9rem, env(safe-area-inset-top, 0px));
+    left: max(0.9rem, env(safe-area-inset-left, 0px));
+    font: 500 0.78rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+    color: var(--fg);
+    background: color-mix(in srgb, var(--bg) 70%, transparent);
+    border: 1px solid color-mix(in srgb, var(--fg) 18%, transparent);
+    border-radius: 0.4rem;
+    padding: 0.5em 0.75em;
+    display: none;
+    max-width: 46vw;
+  }
+  #debug.on { display: block; }
+  #debug .row { display: flex; justify-content: space-between; gap: 1.5em; white-space: nowrap; }
+  #debug .k { color: var(--dim); }
+</style>
+</head>
+<body>
+  <div id="status" role="status" aria-live="polite"><span class="dot"></span><span class="label"></span></div>
+  <div id="debug"></div>
+  <div id="captions"></div>
+
+<script>
+(function () {
+  "use strict";
+  var params = new URLSearchParams(location.search);
+
+  // ?theme=light — default is dark, everything else is opt-in.
+  if (params.get("theme") === "light") {
+    document.documentElement.setAttribute("data-theme", "light");
+  }
+
+  // ?size=N — base font size in vw, clamped in CSS so extreme values stay legible.
+  var sizeParam = parseFloat(params.get("size"));
+  if (!isNaN(sizeParam) && sizeParam > 0) {
+    document.documentElement.style.setProperty("--size", sizeParam + "vw");
+  }
+
+  var maxLines = Math.max(1, parseInt(params.get("lines"), 10) || 3);
+  var debugOn = params.get("debug") === "1";
+
+  var box = document.getElementById("captions");
+  var statusEl = document.getElementById("status");
+  var statusLabel = statusEl.querySelector(".label");
+  var debugEl = document.getElementById("debug");
+
+  var HISTORY_CAP = 200;
+  var finals = [];   // [{id, text}]
+  var pending = "";
+  var lastFinalId = null;
+
+  function render(newlyFinalId) {
+    box.replaceChildren();
+    var slots = pending ? maxLines - 1 : maxLines;
+    var shown = slots > 0 ? finals.slice(-slots) : [];
+    shown.forEach(function (line, i) {
+      var el = document.createElement("div");
+      var isNewest = !pending && i === shown.length - 1;
+      el.className = "line" + (isNewest ? "" : " old");
+      if (line.id && line.id === newlyFinalId) el.classList.add("enter");
+      el.textContent = line.text;
+      box.append(el);
+    });
+    if (pending) {
+      var el = document.createElement("div");
+      el.className = "line pending";
+      el.textContent = pending;
+      box.append(el);
+    }
+  }
+
+  // ---- default lines-count from /api/config, overridden by ?lines= ----
+  if (!params.has("lines")) {
+    fetch("/api/config").then(function (r) { return r.json(); }).then(function (cfg) {
+      if (cfg && cfg.lines > 0) { maxLines = cfg.lines; render(); }
+    }).catch(function () { /* fall back to default silently */ });
+  }
+
+  // ---- connection indicator ----
+  // Two signals feed it: the browser's own EventSource state (onopen/onerror),
+  // and upstream "status" events the server relays about the STT link. The
+  // more severe of the two wins.
+  var sseOpen = false;
+  var hubState = null; // last status event's state, or null if none yet
+
+  function applyIndicator() {
+    var tier = "ok", text = "";
+    if (!sseOpen) {
+      tier = "bad";
+      text = "disconnected";
+    } else if (hubState === "reconnecting" || hubState === "connecting") {
+      tier = "warn";
+      text = hubState === "connecting" ? "connecting" : "reconnecting";
+    } else if (hubState === "closed") {
+      tier = "bad";
+      text = "closed";
+    }
+    statusEl.classList.toggle("warn", tier === "warn");
+    statusEl.classList.toggle("bad", tier === "bad");
+    statusLabel.textContent = text;
+  }
+
+  var es = new EventSource("/events");
+  es.onopen = function () { sseOpen = true; applyIndicator(); };
+  es.onerror = function () {
+    sseOpen = false;
+    applyIndicator();
+  };
+  es.onmessage = function (e) {
+    var ev;
+    try { ev = JSON.parse(e.data); } catch (err) { return; }
+    var newlyFinalId = null;
+    switch (ev.kind) {
+      case "snapshot":
+        finals = ev.lines || [];
+        pending = ev.pending || "";
+        sseOpen = true;
+        break;
+      case "final":
+        finals.push({ id: ev.id, text: ev.text });
+        pending = "";
+        newlyFinalId = ev.id;
+        break;
+      case "interim":
+        pending = ev.text || "";
+        break;
+      case "status":
+        hubState = ev.state || null;
+        applyIndicator();
+        return; // no caption redraw needed
+      default:
+        return;
+    }
+    if (finals.length > HISTORY_CAP) finals = finals.slice(-HISTORY_CAP);
+    applyIndicator();
+    render(newlyFinalId);
+  };
+
+  // ---- debug overlay: STT state + measured latency, polled from /api/stats ----
+  if (debugOn) {
+    debugEl.classList.add("on");
+    var fmtMs = function (v) {
+      return (typeof v === "number" && !isNaN(v)) ? Math.round(v) + " ms" : "—";
+    };
+    var pollDebug = function () {
+      fetch("/api/stats").then(function (r) {
+        if (!r.ok) throw new Error("http " + r.status);
+        return r.json();
+      }).then(function (s) {
+        var stt = s.stt || {};
+        debugEl.innerHTML =
+          '<div class="row"><span class="k">stt state</span><span>' + (stt.state || "—") + '</span></div>' +
+          '<div class="row"><span class="k">latency last</span><span>' + fmtMs(stt.latency_last_ms) + '</span></div>' +
+          '<div class="row"><span class="k">latency p50</span><span>' + fmtMs(stt.latency_p50_ms) + '</span></div>';
+      }).catch(function () {
+        debugEl.innerHTML = '<div class="row"><span class="k">debug</span><span>stats unavailable</span></div>';
+      });
+    };
+    pollDebug();
+    setInterval(pollDebug, 1000);
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>
