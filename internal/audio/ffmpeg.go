@@ -130,6 +130,13 @@ func (p *proc) Close() error {
 	if p.cmd.Process != nil {
 		_ = p.cmd.Process.Signal(interruptSignal)
 	}
+	// Once the pipeline stops consuming frames, nothing else is reading
+	// p.stdout. If ffmpeg is mid-write on a full pipe when the signal
+	// arrives, that write never returns, so it never gets back around to
+	// noticing the signal — it just sits there until WaitDelay force-kills
+	// it. Draining and discarding here unblocks that write so it can exit
+	// on its own, which is almost always well before WaitDelay.
+	go io.Copy(io.Discard, p.stdout)
 	err := p.cmd.Wait()
 	if err != nil && isExpectedExit(err) {
 		return nil
