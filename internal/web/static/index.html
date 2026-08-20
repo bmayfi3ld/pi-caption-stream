@@ -173,6 +173,47 @@
      stay unambiguous so nothing outside the typesetter can affect its metrics. */
   #debug .drow { display: flex; justify-content: space-between; gap: 1.5em; white-space: nowrap; }
   #debug .k { color: var(--dim); }
+
+  /* Backend B's silent looping video: must stay rendered and non-zero-size
+     or browsers treat it as ineligible for both autoplay and screen-on. */
+  #wakevid {
+    position: fixed;
+    width: 1px;
+    height: 1px;
+    opacity: .01;
+    pointer-events: none;
+  }
+  /* Blocking tap gate shown only when Backend B needs its one user gesture. */
+  #gate {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    background: var(--bg);
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.8em;
+    text-align: center;
+    padding: 0 8vw;
+  }
+  #gate:not([hidden]) { display: flex; }
+  #gate button {
+    font: inherit;
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--bg);
+    background: var(--fg);
+    border: none;
+    border-radius: 0.6rem;
+    padding: 0.9em 1.7em;
+    cursor: pointer;
+  }
+  #gate .gate-sub {
+    color: var(--dim);
+    font-size: 0.9rem;
+    max-width: 60ch;
+  }
 </style>
 </head>
 <body>
@@ -185,6 +226,18 @@
   <!-- Long enough that the canvas-vs-layout width calibration in
        computeMetrics() is not dominated by per-glyph rounding. -->
   <div class="row-probe" id="probe" aria-hidden="true">The quick brown fox jumps over the lazy dog, 0123456789</div>
+
+  <!-- Backend B (silent looping video) wake-lock technique: kept playing
+       while the tab is visible. Must stay rendered (see CSS), never
+       display:none, or autoplay/screen-on eligibility is lost. -->
+  <video id="wakevid" muted loop playsinline webkit-playsinline disablepictureinpicture preload="auto" aria-hidden="true">
+    <source src="/wake.mp4" type="video/mp4">
+    <source src="/wake.webm" type="video/webm">
+  </video>
+  <div id="gate" hidden>
+    <button id="gatebtn" type="button">Tap to start</button>
+    <div class="gate-sub">Keeps this screen from sleeping during the event</div>
+  </div>
 
 <script>
 (function () {
@@ -206,6 +259,7 @@
   var linesParamNum = parseInt(params.get("lines"), 10);
   var requestedLines = (!isNaN(linesParamNum) && linesParamNum > 0) ? linesParamNum : 3;
   var debugOn = params.get("debug") === "1";
+  var wakeDisabled = params.get("wake") === "0";
 
   var page = document.getElementById("page");
   var viewport = document.getElementById("viewport");
@@ -628,6 +682,115 @@
     applyIndicator();
   };
 
+  // ---- screen wake lock: a phone sleeping mid-event is the most likely
+  // real-world failure of this interface. The Wake Lock API is secure-
+  // context only and this server has no TLS, so plain HTTP falls back to a
+  // silent looping video (the NoSleep.js technique), which needs one user
+  // gesture before playback is permitted. ?wake=0 disables the feature
+  // entirely, gate included — required for OBS browser sources and
+  // wall-mounted projectors, which nobody is present to tap. ----
+  var wakeBackend = "off";  // "off" | "api" | "video"
+  var wakeHeld = false;
+  var wakeAwaitingTap = false;
+  var wakeInFlight = false; // guards overlapping navigator.wakeLock.request() calls
+  var wakeSentinel = null;  // Backend A: stored so it can actually be released
+  var wakeVid = document.getElementById("wakevid");
+  var wakeGate = document.getElementById("gate");
+  var wakeGateBtn = document.getElementById("gatebtn");
+
+  function wakeDebugText() {
+    if (wakeBackend === "off") return "off";
+    if (wakeBackend === "api") return "api · " + (wakeHeld ? "held" : "released");
+    if (wakeAwaitingTap) return "video · awaiting tap";
+    return "video · " + (wakeHeld ? "held" : "released");
+  }
+
+  function acquireAPI() {
+    if (wakeInFlight || wakeHeld) return;
+    wakeInFlight = true;
+    navigator.wakeLock.request("screen").then(function (sentinel) {
+      wakeInFlight = false;
+      wakeSentinel = sentinel;
+      wakeHeld = true;
+      sentinel.addEventListener("release", function () {
+        wakeHeld = false;
+        if (wakeSentinel === sentinel) wakeSentinel = null;
+      });
+    }).catch(function () {
+      wakeInFlight = false;
+      // Runtime rejection (e.g. NotAllowedError under an OS power-save mode):
+      // degrade to the video backend and raise the gate for its one gesture.
+      wakeBackend = "video";
+      wakeAwaitingTap = true;
+      wakeGate.hidden = false;
+    });
+  }
+
+  function releaseAPI() {
+    if (wakeSentinel) wakeSentinel.release().catch(function () {});
+  }
+
+  function acquireVideo() {
+    if (wakeHeld) return;
+    var p = wakeVid.play();
+    wakeHeld = true;
+    // A rejected play() means the screen is not actually being held, and the
+    // debug row is the only way to see that from a phone — don't let it lie.
+    if (p && p.catch) p.catch(function () { wakeHeld = false; });
+  }
+
+  function releaseVideo() {
+    wakeVid.pause();
+    wakeHeld = false;
+  }
+
+  function acquire() {
+    if (wakeBackend === "api") acquireAPI();
+    else if (wakeBackend === "video") acquireVideo();
+  }
+
+  function release() {
+    if (wakeBackend === "api") releaseAPI();
+    else if (wakeBackend === "video") releaseVideo();
+  }
+
+  // Page-lifetime, not stream-lifetime: never reads sseOpen or hubState, so
+  // an SSE drop and the retry gap before reconnect keep the screen lit. The
+  // only release path is visibilitychange; it re-acquires on the way back.
+  function syncWake() {
+    if (wakeBackend === "off") return;
+    if (wakeBackend === "video" && wakeAwaitingTap) return;
+    if (document.visibilityState === "visible") acquire();
+    else release();
+  }
+
+  // Gate button handler: vid.play() runs synchronously inside the click
+  // handler — that's what spends the gesture credit and unlocks the element
+  // for later programmatic play()/pause() calls for the rest of the page's
+  // life. Then the gate hides for good.
+  function arm() {
+    wakeVid.muted = true; // the muted attribute alone is unreliable in Safari
+    var p = wakeVid.play();
+    if (p && p.catch) p.catch(function () {});
+    wakeAwaitingTap = false;
+    wakeGate.hidden = true;
+    syncWake();
+  }
+  wakeGateBtn.addEventListener("click", arm);
+
+  if (wakeDisabled) {
+    wakeBackend = "off";
+  } else if (window.isSecureContext && navigator.wakeLock) {
+    wakeBackend = "api";
+    syncWake();
+  } else {
+    wakeBackend = "video";
+    wakeAwaitingTap = true;
+    wakeGate.hidden = false;
+  }
+
+  document.addEventListener("visibilitychange", syncWake);
+
   // ---- debug overlay: STT state + measured latency, polled from /api/stats ----
   if (debugOn) {
     debugEl.classList.add("on");
@@ -644,7 +807,8 @@
           '<div class="drow"><span class="k">stt state</span><span>' + (stt.state || "—") + '</span></div>' +
           '<div class="drow"><span class="k">latency last</span><span>' + fmtMs(stt.latency_last_ms) + '</span></div>' +
           '<div class="drow"><span class="k">latency p50</span><span>' + fmtMs(stt.latency_p50_ms) + '</span></div>' +
-          '<div class="drow"><span class="k">stale words</span><span>' + staleCount + '</span></div>';
+          '<div class="drow"><span class="k">stale words</span><span>' + staleCount + '</span></div>' +
+          '<div class="drow"><span class="k">wake</span><span>' + wakeDebugText() + '</span></div>';
       }).catch(function () {
         debugEl.innerHTML = '<div class="drow"><span class="k">debug</span><span>stats unavailable</span></div>';
       });
@@ -652,17 +816,6 @@
     pollDebug();
     setInterval(pollDebug, 1000);
   }
-
-  // ---- screen wake lock: a phone sleeping mid-event is the most likely
-  // real-world failure of this interface. Ignore failure silently. ----
-  function requestWakeLock() {
-    if (!navigator.wakeLock) return;
-    navigator.wakeLock.request("screen").catch(function () {});
-  }
-  requestWakeLock();
-  document.addEventListener("visibilitychange", function () {
-    if (document.visibilityState === "visible") requestWakeLock();
-  });
 })();
 </script>
 </body>

@@ -98,6 +98,13 @@ beside the connection dot. Query parameters:
 | `?theme=light` | light theme (default is dark) |
 | `?debug=1` | overlays measured latency |
 | `?logo=0` | hides the logo (e.g. for OBS, where branding is composited downstream) |
+| `?wake=0` | disables the screen wake lock entirely, gate included (OBS browser sources, wall-mounted displays — nobody there to tap it) |
+
+Over plain HTTP — the standard LAN deployment — the browser's Wake Lock API is unavailable outside
+a secure context, so the viewer falls back to a silent looping video to keep the screen on. That
+needs one tap to unlock playback, so the page shows a one-time "Tap to start" gate before captions
+become visible; captions are already streaming in behind it, so tapping reveals current state
+rather than an empty page. `?wake=0` skips this entirely.
 
 `/admin` is a metrics dashboard (no auth) polling `/api/stats` once a second — restarts, xruns,
 STT reconnects, SSE client counts, latency percentiles. Check it during an event to confirm

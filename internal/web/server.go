@@ -79,6 +79,18 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.Handle("GET /admin", pageHandler(static, "admin.html"))
 	mux.Handle("GET /", pageHandler(static, "index.html"))
 
+	wakeMP4, err := wakeAssetHandler(static, "wake.mp4", "video/mp4")
+	if err != nil {
+		return nil, err
+	}
+	mux.Handle("GET /wake.mp4", wakeMP4)
+
+	wakeWebm, err := wakeAssetHandler(static, "wake.webm", "video/webm")
+	if err != nil {
+		return nil, err
+	}
+	mux.Handle("GET /wake.webm", wakeWebm)
+
 	if cfg.Logo != "" {
 		handler, err := logoHandler(cfg.Logo)
 		if err != nil {
@@ -135,6 +147,30 @@ func logoHandler(path string) (http.Handler, error) {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", ctype)
 		w.Header().Set("Cache-Control", "public, max-age=300")
+		w.Header().Set("ETag", etag)
+		// A fresh Reader per request: bytes.Reader carries a read position,
+		// so sharing one across concurrent requests would race.
+		http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(body))
+	}), nil
+}
+
+// wakeAssetHandler serves one of the wake-lock video assets (Backend B, the
+// silent-looping-video wake lock used over plain HTTP) out of the embedded
+// static FS. Read once at startup, same shape as logoHandler, but unlike the
+// logo these bytes ship with the binary and never change underneath a
+// running server, so the response is safe to cache immutably.
+func wakeAssetHandler(static fs.FS, name, contentType string) (http.Handler, error) {
+	body, err := fs.ReadFile(static, name)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", name, err)
+	}
+
+	sum := sha256.Sum256(body)
+	etag := `"` + hex.EncodeToString(sum[:])[:16] + `"`
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		w.Header().Set("ETag", etag)
 		// A fresh Reader per request: bytes.Reader carries a read position,
 		// so sharing one across concurrent requests would race.

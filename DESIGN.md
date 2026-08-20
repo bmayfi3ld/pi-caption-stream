@@ -241,8 +241,15 @@ means visible rows, not utterances.
 The phone is the primary viewer, so it sets the defaults rather than being an afterthought: type
 is larger in portrait (`4vw` is unreadable at phone widths), the visible row count is capped by
 what actually fits so a short landscape screen loses a row instead of clipping one, and the page
-takes a screen wake lock — a handset sleeping mid-event is the likeliest way this interface
-fails. The same URL still serves a projector and an OBS browser source.
+holds a screen wake lock for as long as it's open and visible — a handset sleeping mid-event is
+the likeliest way this interface fails. The Wake Lock API is secure-context only, and the standard
+deployment is plain HTTP to a LAN address (adding TLS would mean a browser cert warning on every
+phone at every event), so `navigator.wakeLock` is simply undefined there. The viewer falls back to
+a silent looping `<video>` — the NoSleep.js technique — as the only mechanism that keeps a screen
+on over insecure HTTP. That backend needs one user gesture to unlock video playback, met by a
+one-time full-screen tap gate on first load (skippable with `?wake=0` for OBS sources and
+unattended displays, which have nobody present to tap it). The same URL still serves a projector
+and an OBS browser source.
 
 **Admin** — polls `/api/stats` once a second. Simpler than SSE for a single operator client.
 

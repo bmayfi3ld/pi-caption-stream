@@ -293,6 +293,24 @@ func TestAPIConfigReportsLogoState(t *testing.T) {
 	}
 }
 
+// TestWakeVideoServedWithContentType covers Backend B's asset route: the
+// silent looping video that keeps a phone screen on over plain HTTP must be
+// reachable at a fixed URL with the right Content-Type so it can autoplay.
+func TestWakeVideoServedWithContentType(t *testing.T) {
+	base, _, _ := startTestServer(t, newTestConfig())
+	resp, err := http.Get(base + "/wake.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "video/mp4" {
+		t.Errorf("Content-Type = %q, want video/mp4", ct)
+	}
+}
+
 // nextSSEData reads one "data: ..." payload from an SSE stream, skipping the
 // retry directive and ping comments that aren't a message.
 func nextSSEData(t *testing.T, r *bufio.Reader) string {
