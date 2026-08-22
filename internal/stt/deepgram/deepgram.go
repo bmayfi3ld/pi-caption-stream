@@ -456,6 +456,7 @@ func (e *Engine) dialURL() string {
 	q.Set("language", e.cfg.Language)
 	q.Set("interim_results", "true")
 	q.Set("punctuate", "true")
+	q.Set("profanity_filter", "true")
 	q.Set("smart_format", "true")
 	q.Set("endpointing", "300")
 	q.Set("utterance_end_ms", "1000")
