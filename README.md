@@ -11,7 +11,9 @@ captioning. See [DESIGN.md](DESIGN.md) for the architecture and the reasoning be
 - A [Deepgram](https://deepgram.com) API key, set via `DEEPGRAM_API_KEY` or `--api-key`
 
 `--engine mock` needs neither a key nor network access — it emits canned transcripts driven by
-media time, which is what makes the tool testable without hardware or API spend.
+media time, which is what makes the tool testable without hardware or API spend. `--engine mock-2`
+does the same but additionally drives auto-pause (see below) on a fixed schedule, for exercising
+that behavior offline.
 
 ## Build
 
@@ -48,6 +50,13 @@ reproducible at any `--speed` since the mock engine is driven by media time, not
 `--speed 20` blows through a half-hour file in under two minutes for a quick sanity check;
 `--loop` restarts on EOF for soak testing.
 
+Swap in `--engine mock-2` to see auto-pause without waiting for real silence: it drives the same
+gate that `deepgram` uses, but off a synthetic level schedule instead of the actual
+(continuous-speech) audio — 20 s loud, then silent for `--silence-hold` plus 20 s (so the hold is
+always reached and the paused state stays visible for a while, whatever `--silence-hold` is set
+to) — so the connection visibly pauses and resumes on a predictable cadence — useful for checking
+the viewer/admin/status-line indicators without an idle room to record.
+
 To judge caption delay by ear, add `--monitor`:
 
 ```bash
@@ -70,6 +79,23 @@ livecaption live --device <name-from-devices> --keyterm "Anthropic" --keyterm "C
 if enumeration fails outright for the chosen backend, validation is skipped with a logged warning
 rather than blocking the run), and then confirmed with a probe read before the session begins — so
 a typo is a clear startup error, not room noise captioned as your event.
+
+### Auto-pause
+
+Both `live` and `replay` close the Deepgram connection during silence and reopen it when audio
+returns, so a quiet room doesn't rack up recognizer charges (see DESIGN.md §3 for how it decides
+what counts as silence and why closing rather than idling the connection). It's on by default:
+
+| flag | default | effect |
+|---|---|---|
+| `--auto-pause` / `--no-auto-pause` | on | enable/disable the feature |
+| `--silence-threshold-db` | `-45` | dBFS at or below which a frame counts as silence |
+| `--silence-hold` | `60s` | how long silence has to hold (in media time) before pausing |
+
+Turn it off with `--no-auto-pause` for a venue where dead air should still keep the connection
+warm, or raise `--silence-hold` if quiet-room pauses are firing during ordinary pauses for breath.
+`/admin` and the status line report `pauses_total` and `paused_sec` so a mistuned gate is visible
+rather than inferred from the Deepgram bill.
 
 ### `version`
 
@@ -107,8 +133,11 @@ become visible; captions are already streaming in behind it, so tapping reveals 
 rather than an empty page. `?wake=0` skips this entirely.
 
 `/admin` is a metrics dashboard (no auth) polling `/api/stats` once a second — restarts, xruns,
-STT reconnects, SSE client counts, latency percentiles. Check it during an event to confirm
-nothing is degrading silently.
+STT reconnects, buffer drops, auto-pause count and total paused time, SSE client counts, latency
+percentiles. A status badge at the top reads `ok` / `degraded` / `paused` / `closed`: an auto-pause
+shows as "STT Paused," not "Degraded" — it's expected, money-saving behaviour, not a fault — and a
+past blip (a reconnect, a buffer drop) only holds the badge at "Degraded" briefly rather than for
+the rest of the session. Check it during an event to confirm nothing is degrading silently.
 
 ## stdout vs stderr
 
@@ -127,13 +156,13 @@ livecaption replay recording.mp3 > captions.txt 2> run.log
   nothing, helps a lot.
 - **Do a `--monitor` dry run beforehand** (on `replay`, with representative audio) to hear and tune
   perceived delay before you're live.
-- **Check `/admin` shows a clean run** — no restarts, no reconnects, no dropped frames — before
+- **Check `/admin` shows a clean run** — no restarts, no reconnects, no buffer drops — before
   trusting the feed.
 
 ## Troubleshooting
 
 - **401 on first connect** — check `DEEPGRAM_API_KEY` (or `--api-key`).
-- **`unknown stt engine`** — only `deepgram` and `mock` are registered; check `--engine`.
+- **`unknown stt engine`** — only `deepgram`, `mock`, and `mock-2` are registered; check `--engine`.
 - **No devices listed by `devices`** — confirm `ffmpeg` is on `PATH` and a sound server (PulseAudio
   / PipeWire) is running; `alsa` enumeration commonly comes back empty even when ALSA devices work
   fine, so also try known names like `hw:0,0` or `default` directly with `live --backend alsa`.
@@ -141,3 +170,6 @@ livecaption replay recording.mp3 > captions.txt 2> run.log
   how quickly a line closes; they're constants in `internal/stt/deepgram/deepgram.go` rather than
   flags. Lowering them closes lines sooner at the cost of more mid-sentence breaks. Tune by ear
   with `--monitor` before the event, and see DESIGN.md §10.
+- **First word after a quiet spell is missing/late, or the connection pauses during ordinary
+  pauses for breath** — auto-pause; loosen it with a lower `--silence-threshold-db` (more negative)
+  or a longer `--silence-hold`, or disable it with `--no-auto-pause`. See "Auto-pause" above.

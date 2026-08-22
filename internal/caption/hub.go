@@ -74,6 +74,11 @@ type Hub struct {
 	committed string
 	interim   string
 	uttStart  time.Duration
+	// lastState/lastDetail are the most recent status published via
+	// PublishStatus. Subscribe replays them into the snapshot event so a
+	// client that connects (or reconnects) mid-pause learns the current
+	// state immediately, instead of waiting for a change that may never come.
+	lastState, lastDetail string
 
 	subs    map[chan Event]struct{}
 	metrics *metrics.Metrics
@@ -164,6 +169,7 @@ func (h *Hub) PublishStatus(state, detail string) {
 	h.mu.Lock()
 	ev := h.newEventLocked(KindStatus)
 	ev.State, ev.Detail = state, detail
+	h.lastState, h.lastDetail = state, detail
 	h.mu.Unlock()
 	h.broadcast(ev)
 }
@@ -195,6 +201,10 @@ func (h *Hub) Subscribe() (<-chan Event, func()) {
 	snap := Event{Seq: h.seq, Kind: KindSnapshot, At: time.Now()}
 	snap.Lines = append([]Line(nil), h.history...)
 	snap.Pending = joinText(h.committed, h.interim)
+	// Replay the last published status so a subscriber who connects (or
+	// reconnects) mid-pause sees the correct indicator immediately, rather
+	// than defaulting to "ok" until the state happens to change again.
+	snap.State, snap.Detail = h.lastState, h.lastDetail
 	h.subs[ch] = struct{}{}
 	h.mu.Unlock()
 

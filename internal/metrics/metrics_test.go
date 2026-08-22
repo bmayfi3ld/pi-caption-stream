@@ -95,6 +95,7 @@ func TestSnapshotCleanIsFalseForEachDegradation(t *testing.T) {
 		"xruns":            func(m *Metrics) { m.Xrun() },
 		"monitor drops":    func(m *Metrics) { m.MonitorDrop() },
 		"stt reconnects":   func(m *Metrics) { m.STTReconnect() },
+		"stt buffer drops": func(m *Metrics) { m.STTBufferDrop() },
 		"slow disconnects": func(m *Metrics) { m.SSESlowDrop() },
 		"transcript error": func(m *Metrics) { m.SetTranscriptError(errors.New("disk full")) },
 	}
@@ -106,6 +107,183 @@ func TestSnapshotCleanIsFalseForEachDegradation(t *testing.T) {
 				t.Errorf("%s: Clean() = true, want false", name)
 			}
 		})
+	}
+}
+
+// TestHealthFreshSessionIsOK guards the default: a session with nothing
+// recorded yet must not show any flavor of trouble on /admin.
+func TestHealthFreshSessionIsOK(t *testing.T) {
+	snap := New("v", "s").Snapshot()
+	if snap.Health != "ok" {
+		t.Errorf("Health = %q, want %q", snap.Health, "ok")
+	}
+}
+
+// TestHealthPausedWinsOverDegradation is the case this whole phase exists
+// for: a long auto-pause manufactures ring-eviction drops (STTBufferDrop
+// while the gate happens to be marked active, or any other degradation
+// counter left over from before the pause), but the badge must still read
+// "paused", not "degraded" — the state explains itself, and stacking a
+// warning on top of expected, money-saving behaviour would be exactly the
+// permanent-latch bug this fixes.
+func TestHealthPausedWinsOverDegradation(t *testing.T) {
+	m := New("v", "s")
+	m.STTReconnect() // leaves lastDegradedAt freshly stamped
+	m.SetSTTState(StatePaused)
+
+	snap := m.Snapshot()
+	if snap.Health != "paused" {
+		t.Errorf("Health = %q, want %q (pause must win over a stale degradation stamp)", snap.Health, "paused")
+	}
+}
+
+// TestHealthClosedWinsOverDegradation is the same precedence check for the
+// other terminal state: once the connection is closed, that's what the
+// badge should say, not "degraded".
+func TestHealthClosedWinsOverDegradation(t *testing.T) {
+	m := New("v", "s")
+	m.STTReconnect()
+	m.SetSTTState(StateClosed)
+
+	snap := m.Snapshot()
+	if snap.Health != "closed" {
+		t.Errorf("Health = %q, want %q", snap.Health, "closed")
+	}
+}
+
+// TestHealthTranscriptErrorStaysDegradedPastWindow guards the distinction
+// between a point event and a standing condition: lastDegradedAt ages out
+// after degradedWindow, but a transcript write error is still actually
+// happening until it's cleared, so it must keep the badge amber even once
+// any point-event stamp is long stale. Otherwise the badge would flip to
+// "ok" while the transcript diag panel on /admin is still showing a live
+// error right below it.
+func TestHealthTranscriptErrorStaysDegradedPastWindow(t *testing.T) {
+	m := New("v", "s")
+	m.SetTranscriptError(errors.New("disk full"))
+
+	m.mu.Lock()
+	m.lastDegradedAt = time.Now().Add(-degradedWindow - time.Second)
+	m.mu.Unlock()
+
+	snap := m.Snapshot()
+	if snap.Health != "degraded" {
+		t.Errorf("Health = %q, want %q (a standing transcript error must not age out)", snap.Health, "degraded")
+	}
+}
+
+// TestHealthPausedWinsOverTranscriptError extends the pause-wins-over-
+// degradation precedence to the transcript-error case specifically: a
+// paused session with a stale write error should still read "paused", not
+// "degraded" — the pause explains current state regardless of which kind
+// of degradation is also true.
+func TestHealthPausedWinsOverTranscriptError(t *testing.T) {
+	m := New("v", "s")
+	m.SetTranscriptError(errors.New("disk full"))
+	m.SetSTTState(StatePaused)
+
+	snap := m.Snapshot()
+	if snap.Health != "paused" {
+		t.Errorf("Health = %q, want %q (pause must win over a standing transcript error)", snap.Health, "paused")
+	}
+}
+
+// TestHealthDegradedAfterSTTReconnect checks the ordinary case: a
+// degradation event with the link otherwise up and running turns the badge
+// amber right away.
+func TestHealthDegradedAfterSTTReconnect(t *testing.T) {
+	m := New("v", "s")
+	m.STTReconnect()
+
+	snap := m.Snapshot()
+	if snap.Health != "degraded" {
+		t.Errorf("Health = %q, want %q", snap.Health, "degraded")
+	}
+}
+
+// TestHealthReturnsToOKAfterWindowElapses checks the badge is recency-based,
+// not a permanent latch: once the degradation event falls outside
+// degradedWindow, health goes back to "ok". lastDegradedAt is set directly
+// (same package) instead of sleeping degradedWindow in a test.
+func TestHealthReturnsToOKAfterWindowElapses(t *testing.T) {
+	m := New("v", "s")
+	m.STTReconnect()
+
+	m.mu.Lock()
+	m.lastDegradedAt = time.Now().Add(-degradedWindow - time.Second)
+	m.mu.Unlock()
+
+	snap := m.Snapshot()
+	if snap.Health != "ok" {
+		t.Errorf("Health = %q, want %q once the degradation event is outside the window", snap.Health, "ok")
+	}
+}
+
+// TestSTTStateHookFiresOnChangeOnly guards the /admin status-event wiring:
+// the hook drives Hub.PublishStatus, and firing it on a repeated set of the
+// same state would spam subscribers with no-op transitions.
+func TestSTTStateHookFiresOnChangeOnly(t *testing.T) {
+	m := New("v", "s")
+
+	var got []ConnState
+	m.SetSTTStateHook(func(s ConnState) { got = append(got, s) })
+
+	m.SetSTTState(StateConnecting)
+	m.SetSTTState(StateConnecting) // repeat: must not fire again
+	m.SetSTTState(StateConnected)
+	m.SetSTTState(StateConnected) // repeat: must not fire again
+	m.SetSTTState(StatePaused)
+
+	want := []ConnState{StateConnecting, StateConnected, StatePaused}
+	if len(got) != len(want) {
+		t.Fatalf("hook fired %d times, want %d: %v", len(got), len(want), got)
+	}
+	for i, s := range want {
+		if got[i] != s {
+			t.Errorf("hook call %d = %v, want %v", i, got[i], s)
+		}
+	}
+}
+
+// TestSTTPauseAccounting exercises STTPauseBegin/End including a pause still
+// open at snapshot time, which must count toward PausedSec live rather than
+// only once it ends, and checks both calls are idempotent-safe.
+func TestSTTPauseAccounting(t *testing.T) {
+	m := New("v", "s")
+
+	if snap := m.Snapshot(); snap.STT.Pauses != 0 || snap.STT.PausedSec != 0 {
+		t.Fatalf("fresh session should report no pauses, got %+v", snap.STT)
+	}
+
+	m.STTPauseBegin()
+	m.STTPauseBegin() // duplicate Begin must not reset the start time or double-count
+	time.Sleep(20 * time.Millisecond)
+
+	openSnap := m.Snapshot()
+	if openSnap.STT.Pauses != 1 {
+		t.Errorf("pauses = %d, want 1", openSnap.STT.Pauses)
+	}
+	if openSnap.STT.PausedSec <= 0 {
+		t.Error("an open pause should already count toward PausedSec")
+	}
+
+	m.STTPauseEnd()
+	m.STTPauseEnd() // duplicate End must be a no-op
+
+	closedSnap := m.Snapshot()
+	if closedSnap.STT.Pauses != 1 {
+		t.Errorf("pauses after end = %d, want 1", closedSnap.STT.Pauses)
+	}
+	if closedSnap.STT.PausedSec < openSnap.STT.PausedSec {
+		t.Errorf("PausedSec should not shrink after End: got %v, was %v", closedSnap.STT.PausedSec, openSnap.STT.PausedSec)
+	}
+
+	// A second pause/resume cycle should add on top, not reset.
+	m.STTPauseBegin()
+	m.STTPauseEnd()
+	finalSnap := m.Snapshot()
+	if finalSnap.STT.Pauses != 2 {
+		t.Errorf("pauses after second cycle = %d, want 2", finalSnap.STT.Pauses)
 	}
 }
 

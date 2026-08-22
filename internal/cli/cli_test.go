@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeTempFile(t *testing.T) string {
@@ -115,6 +117,9 @@ func TestRequireAPIKey(t *testing.T) {
 	if err := requireAPIKey("mock", ""); err != nil {
 		t.Errorf("mock engine should not need a key: %v", err)
 	}
+	if err := requireAPIKey("mock-2", ""); err != nil {
+		t.Errorf("mock-2 engine should not need a key: %v", err)
+	}
 	if err := requireAPIKey("deepgram", ""); err == nil {
 		t.Error("deepgram without a key should fail fast")
 	} else if !strings.Contains(err.Error(), "DEEPGRAM_API_KEY") {
@@ -122,6 +127,83 @@ func TestRequireAPIKey(t *testing.T) {
 	}
 	if err := requireAPIKey("deepgram", "k"); err != nil {
 		t.Errorf("deepgram with a key should pass: %v", err)
+	}
+}
+
+// TestAutoPauseDefaults guards the intent that auto-pause is on by default
+// with sensible values, not something an operator has to remember to enable.
+func TestAutoPauseDefaults(t *testing.T) {
+	file := writeTempFile(t)
+	_, c, err := Parse([]string{"replay", file})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Replay.AutoPause {
+		t.Error("auto-pause should default to enabled")
+	}
+	if c.Replay.SilenceDB != -45 {
+		t.Errorf("SilenceDB default = %v, want -45", c.Replay.SilenceDB)
+	}
+	if c.Replay.SilenceHold != 60*time.Second {
+		t.Errorf("SilenceHold default = %v, want 60s", c.Replay.SilenceHold)
+	}
+}
+
+// TestAutoPauseNegatable checks --no-auto-pause turns it off, matching how
+// deepgram.go decides whether to build an enabled Gate.
+func TestAutoPauseNegatable(t *testing.T) {
+	file := writeTempFile(t)
+	_, c, err := Parse([]string{"replay", file, "--no-auto-pause"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Replay.AutoPause {
+		t.Error("--no-auto-pause should disable AutoPause")
+	}
+}
+
+// TestMockTwoEngineIsAccepted covers the offline auto-pause demo engine
+// registered alongside "mock" and "deepgram".
+func TestMockTwoEngineIsAccepted(t *testing.T) {
+	file := writeTempFile(t)
+	_, c, err := Parse([]string{"replay", file, "--engine", "mock-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Replay.Engine != "mock-2" {
+		t.Errorf("Engine = %q, want mock-2", c.Replay.Engine)
+	}
+}
+
+// TestSilenceThresholdValidation covers the exclusive -100..0 constraint.
+// RMSDBFS clamps at -100, so a threshold at or below that can never be
+// reached; and since the gate counts a frame as silence at or below the
+// threshold, 0 dBFS (full scale) would make every frame silence and leave the
+// session permanently paused rather than transcribing.
+func TestSilenceThresholdValidation(t *testing.T) {
+	file := writeTempFile(t)
+	for _, db := range []float64{0.5, 0, -100, -150} {
+		arg := fmt.Sprintf("--silence-threshold-db=%v", db)
+		if _, _, err := Parse([]string{"replay", file, arg}); err == nil {
+			t.Errorf("%s should be rejected", arg)
+		}
+	}
+	for _, db := range []float64{-0.5, -45, -99} {
+		arg := fmt.Sprintf("--silence-threshold-db=%v", db)
+		if _, _, err := Parse([]string{"replay", file, arg}); err != nil {
+			t.Errorf("%s should be accepted: %v", arg, err)
+		}
+	}
+}
+
+// TestSilenceHoldValidation covers the > 0 constraint on --silence-hold.
+func TestSilenceHoldValidation(t *testing.T) {
+	file := writeTempFile(t)
+	if _, _, err := Parse([]string{"replay", file, "--silence-hold", "0s"}); err == nil {
+		t.Error("--silence-hold 0s should be rejected")
+	}
+	if _, _, err := Parse([]string{"replay", file, "--silence-hold", "5s"}); err != nil {
+		t.Errorf("--silence-hold 5s should be accepted: %v", err)
 	}
 }
 

@@ -7,6 +7,7 @@ package cli
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/alecthomas/kong"
 )
@@ -35,11 +36,31 @@ type Globals struct {
 
 // STTFlags configure the speech-to-text backend.
 type STTFlags struct {
-	Engine   string   `default:"deepgram" enum:"deepgram,mock" group:"Speech-to-text" help:"Recognizer to use. 'mock' runs offline with no API cost."`
+	Engine   string   `default:"deepgram" enum:"deepgram,mock,mock-2" group:"Speech-to-text" help:"Recognizer to use. 'mock' runs offline with no API cost; 'mock-2' additionally demonstrates auto-pause offline."`
 	APIKey   string   `env:"DEEPGRAM_API_KEY" group:"Speech-to-text" help:"Deepgram API key."`
 	Model    string   `default:"nova-3" group:"Speech-to-text" help:"Deepgram model."`
 	Language string   `default:"en-US" group:"Speech-to-text" help:"Recognition language."`
 	Keyterm  []string `group:"Speech-to-text" help:"Proper noun to bias recognition toward. Repeatable."`
+
+	AutoPause   bool          `default:"true" negatable:"" group:"Speech-to-text" help:"Stop the recognizer connection while the audio is silent, so a quiet room costs nothing."`
+	SilenceDB   float64       `name:"silence-threshold-db" default:"-45" group:"Speech-to-text" help:"dBFS at or below which audio counts as silence."`
+	SilenceHold time.Duration `name:"silence-hold" default:"60s" group:"Speech-to-text" help:"How long the audio must stay silent before the connection is paused."`
+}
+
+// Validate rejects silence-detection settings that can't work. The gate counts
+// a frame as silence at or below the threshold, so 0 dBFS — full scale — would
+// classify every frame as silence and the session would sit paused forever
+// without transcribing a word. At the other end, -100 is the floor RMSDBFS
+// clamps digital silence to, so nothing can fall below it.
+func (f *STTFlags) Validate() error {
+	if f.SilenceDB >= 0 || f.SilenceDB <= -100 {
+		return fmt.Errorf("--silence-threshold-db must be between -100 and 0, exclusive (got %g): "+
+			"0 dBFS is full scale, so a threshold there would treat all audio as silence", f.SilenceDB)
+	}
+	if f.SilenceHold <= 0 {
+		return fmt.Errorf("--silence-hold must be positive (got %s)", f.SilenceHold)
+	}
+	return nil
 }
 
 // ServerFlags configure the caption web server.

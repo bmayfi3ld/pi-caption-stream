@@ -26,6 +26,10 @@ type Transcript struct {
 	Duration   time.Duration
 	Confidence float64
 	ReceivedAt time.Time
+	// CapturedAt is when the audio this transcript covers was released into the
+	// pipeline. Zero when the engine could not resolve it; latency is then simply
+	// not recorded, because a wrong number is worse than no number.
+	CapturedAt time.Time
 }
 
 // End is the media time of the last sample this transcript covers.
@@ -40,6 +44,7 @@ type Config struct {
 	Keyterms       []string // event-specific proper nouns
 	APIKey         string
 	Metrics        *metrics.Metrics
+	Pause          PauseConfig
 }
 
 // Engine consumes PCM frames and emits transcripts.

@@ -58,6 +58,11 @@ const (
 	drainTimeout = 3 * time.Second
 )
 
+// errPause is writeLoop's sentinel for "the gate went inactive", distinct
+// from a real write failure: runConnection treats it as a polite hangup
+// (finish(), no reconnect accounting) rather than a lost link.
+var errPause = errors.New("deepgram: audio paused")
+
 // Engine streams PCM to Deepgram's real-time API and turns its JSON messages
 // into stt.Transcript. It owns its own reconnect logic per the stt.Engine
 // contract: Run returns only when ctx is cancelled or frames run out.
@@ -74,6 +79,7 @@ func (e *Engine) Name() string { return "deepgram" }
 func (e *Engine) Run(ctx context.Context, frames <-chan audio.Frame, out chan<- stt.Transcript) error {
 	log := slog.Default()
 	met := e.cfg.Metrics
+	gate := stt.NewGate(e.cfg.Pause)
 
 	capBytes := e.cfg.Format.BytesFor(bufferAudio)
 	if capBytes <= 0 {
@@ -81,11 +87,14 @@ func (e *Engine) Run(ctx context.Context, frames <-chan audio.Frame, out chan<- 
 		// back to the pipeline's own rate rather than buffering nothing.
 		capBytes = audio.PipelineFormat.BytesFor(bufferAudio)
 	}
-	buf := newRing(capBytes, met)
+	buf := newRing(capBytes, met, gate)
 
 	// Drains frames into buf for the whole lifetime of Run, independent of
 	// connection state, so the audio source is never blocked by a dead or
-	// reconnecting link.
+	// reconnecting link. Every frame is pushed, including silent ones while
+	// paused: the ring naturally holds the most recent ~2s, so when speech
+	// resumes it already contains the onset as pre-roll and the first word
+	// survives the redial.
 	framesClosed := make(chan struct{})
 	go func() {
 		defer close(framesClosed)
@@ -95,7 +104,8 @@ func (e *Engine) Run(ctx context.Context, frames <-chan audio.Frame, out chan<- 
 				if !ok {
 					return
 				}
-				buf.push(f.PCM)
+				gate.Observe(f)
+				buf.push(f)
 			case <-ctx.Done():
 				return
 			}
@@ -146,23 +156,70 @@ func (e *Engine) Run(ctx context.Context, frames <-chan audio.Frame, out chan<- 
 		}
 		log.Info("deepgram: connected")
 
-		reconnect, rerr := e.runConnection(ctx, conn, buf, framesClosed, out, log, met)
-		if !reconnect {
+		oc, rerr := e.runConnection(ctx, conn, buf, framesClosed, out, log, met, gate)
+		switch oc {
+		case outcomeDone:
 			return nil
+
+		case outcomePause:
+			if ctx.Err() != nil {
+				return nil
+			}
+			if met != nil {
+				met.SetSTTState(metrics.StatePaused)
+				met.STTPauseBegin()
+			}
+			log.Info("deepgram: audio silent, connection paused")
+
+			// Wait for the gate to go active again rather than polling it.
+			// Changed() must be fetched *before* Active() is tested: it hands
+			// back the channel for the next transition, so reading it after a
+			// false Active() would miss a resume landing in between and park
+			// the connection until the pause after next — a whole segment of
+			// speech lost with nothing in the logs to show for it.
+			for {
+				changed := gate.Changed()
+				if gate.Active() {
+					break
+				}
+				select {
+				case <-changed:
+				case <-framesClosed:
+					// Ring is full of silence; nothing worth redialing for.
+					if met != nil {
+						met.STTPauseEnd()
+					}
+					return nil
+				case <-ctx.Done():
+					if met != nil {
+						met.STTPauseEnd()
+					}
+					return nil
+				}
+			}
+			if met != nil {
+				met.STTPauseEnd()
+			}
+			// A pause/resume cycle is not an error: no STTReconnect or
+			// SetSTTError, since Snapshot.Clean() keys off reconnects.
+			backoff = minBackoff
+			continue
+
+		default: // outcomeReconnect
+			if ctx.Err() != nil {
+				return nil
+			}
+			if met != nil {
+				met.SetSTTError(rerr)
+				met.SetSTTState(metrics.StateReconnecting)
+				met.STTReconnect()
+			}
+			log.Warn("deepgram: disconnected, reconnecting", "err", rerr, "retry_in", backoff)
+			if !sleepBackoff(ctx, backoff, rng) {
+				return nil
+			}
+			backoff = nextBackoff(backoff)
 		}
-		if ctx.Err() != nil {
-			return nil
-		}
-		if met != nil {
-			met.SetSTTError(rerr)
-			met.SetSTTState(metrics.StateReconnecting)
-			met.STTReconnect()
-		}
-		log.Warn("deepgram: disconnected, reconnecting", "err", rerr, "retry_in", backoff)
-		if !sleepBackoff(ctx, backoff, rng) {
-			return nil
-		}
-		backoff = nextBackoff(backoff)
 	}
 }
 
@@ -175,9 +232,19 @@ func audioExhausted(framesClosed <-chan struct{}, buf *ring) bool {
 	}
 }
 
+// connOutcome tells Run what happened to one WebSocket lifetime, since
+// "audio went silent" and "the link died" call for different handling: a
+// pause is not an error and must not be counted as a reconnect.
+type connOutcome int
+
+const (
+	outcomeDone connOutcome = iota
+	outcomeReconnect
+	outcomePause
+)
+
 // runConnection drives one WebSocket lifetime: a writer goroutine sending PCM
-// and KeepAlives, a reader goroutine turning Results into Transcripts. It
-// returns reconnect=true when the link was lost and Run should redial.
+// and KeepAlives, a reader goroutine turning Results into Transcripts.
 func (e *Engine) runConnection(
 	ctx context.Context,
 	conn *websocket.Conn,
@@ -186,40 +253,55 @@ func (e *Engine) runConnection(
 	out chan<- stt.Transcript,
 	log *slog.Logger,
 	met *metrics.Metrics,
-) (reconnect bool, retErr error) {
+	gate *stt.Gate,
+) (connOutcome, error) {
 	// connCtx is deliberately not derived from ctx: on shutdown we want to
 	// keep reading trailing Results for a bit after CloseStream, which a
 	// ctx-derived context would cut off immediately.
 	connCtx, cancelConn := context.WithCancel(context.Background())
 	defer cancelConn()
 
+	// A new WebSocket means Deepgram's byte-counting clock restarts at 0, so
+	// the anchor index must restart with it: idx is built here, before either
+	// goroutine launches, and lives exactly as long as this connection. That
+	// makes readLoop of connection N structurally unable to consult the index
+	// of connection N+1, and there is no reset path to race.
+	idx := newAnchorIndex(e.cfg.Format)
+
 	readErr := make(chan error, 1)
-	go func() { readErr <- e.readLoop(connCtx, conn, out, met, log) }()
+	go func() { readErr <- e.readLoop(connCtx, conn, out, met, log, idx) }()
 
 	writeErr := make(chan error, 1)
-	go func() { writeErr <- e.writeLoop(ctx, connCtx, conn, buf, framesClosed, met) }()
+	go func() { writeErr <- e.writeLoop(ctx, connCtx, conn, buf, framesClosed, met, gate, idx) }()
 
 	select {
 	case werr := <-writeErr:
+		if errors.Is(werr, errPause) {
+			// Audio went silent: wrap up exactly like a clean end-of-session
+			// so trailing Results aren't lost, then let Run wait for resume
+			// instead of redialing immediately.
+			e.finish(conn, readErr, log)
+			return outcomePause, nil
+		}
 		if werr != nil {
 			// A real write failure: the connection is already dead, no point
 			// sending CloseStream.
 			cancelConn()
 			<-readErr
 			conn.CloseNow()
-			return true, werr
+			return outcomeReconnect, werr
 		}
 		// Audio is exhausted (frames closed and drained) or ctx was
 		// cancelled: wrap up politely so the tail of the session isn't lost.
 		e.finish(conn, readErr, log)
-		return false, nil
+		return outcomeDone, nil
 
 	case rerr := <-readErr:
 		// The server ended the session or the read failed outright.
 		cancelConn()
 		<-writeErr
 		conn.CloseNow()
-		return true, rerr
+		return outcomeReconnect, rerr
 	}
 }
 
@@ -241,8 +323,9 @@ func (e *Engine) finish(conn *websocket.Conn, readErr <-chan error, log *slog.Lo
 
 // writeLoop drains buf into binary WebSocket frames and sends a KeepAlive
 // whenever 5s pass with no audio sent. It returns nil on a clean end (audio
-// exhausted or ctx cancelled) and a non-nil error only on a real write
-// failure, which the caller treats as "reconnect".
+// exhausted or ctx cancelled), errPause once the gate goes inactive, and a
+// non-nil error only on a real write failure, which the caller treats as
+// "reconnect".
 func (e *Engine) writeLoop(
 	ctx context.Context,
 	connCtx context.Context,
@@ -250,18 +333,33 @@ func (e *Engine) writeLoop(
 	buf *ring,
 	framesClosed <-chan struct{},
 	met *metrics.Metrics,
+	gate *stt.Gate,
+	idx *anchorIndex,
 ) error {
 	ticker := time.NewTicker(keepAliveInterval)
 	defer ticker.Stop()
 	lastActivity := time.Now()
 
 	for {
-		if pcm, ok := buf.pop(); ok {
-			if err := conn.Write(connCtx, websocket.MessageBinary, pcm); err != nil {
+		// Fetched before the Active() test for the same reason as in Run:
+		// a transition landing between the two must not go unnoticed.
+		gateChanged := gate.Changed()
+		if !gate.Active() {
+			return errPause
+		}
+
+		if c, ok := buf.pop(); ok {
+			// Recorded immediately BEFORE the write, not after: recording
+			// after would leave a window where a fast server reply makes
+			// readLoop look up bytes the index doesn't know about yet. If the
+			// write then fails, the connection and this index are both
+			// discarded together, so a pre-recorded entry is harmless.
+			idx.Add(len(c.pcm), c.capturedAt)
+			if err := conn.Write(connCtx, websocket.MessageBinary, c.pcm); err != nil {
 				return err
 			}
 			if met != nil {
-				met.STTBytesSent(len(pcm))
+				met.STTBytesSent(len(c.pcm))
 			}
 			lastActivity = time.Now()
 			continue
@@ -275,6 +373,9 @@ func (e *Engine) writeLoop(
 			// Frames closed but buf still has data queued from just before
 			// the close; loop back around to drain it.
 		case <-buf.notify:
+		case <-gateChanged:
+			// Loop back to the top, which re-checks Active(): the pause
+			// decision may have just flipped either way.
 		case <-ticker.C:
 			if time.Since(lastActivity) >= keepAliveInterval {
 				if err := writeJSON(connCtx, conn, controlMessage{Type: "KeepAlive"}); err != nil {
@@ -292,7 +393,7 @@ func (e *Engine) writeLoop(
 
 // readLoop decodes server messages into Transcripts until the connection
 // fails or ctx is cancelled.
-func (e *Engine) readLoop(ctx context.Context, conn *websocket.Conn, out chan<- stt.Transcript, met *metrics.Metrics, log *slog.Logger) error {
+func (e *Engine) readLoop(ctx context.Context, conn *websocket.Conn, out chan<- stt.Transcript, met *metrics.Metrics, log *slog.Logger, idx *anchorIndex) error {
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
@@ -307,6 +408,14 @@ func (e *Engine) readLoop(ctx context.Context, conn *websocket.Conn, out chan<- 
 			continue
 		}
 		t.ReceivedAt = time.Now()
+		// Anchor the transcript's media end-time to wall-clock capture time on
+		// THIS connection. UtteranceEnd decodes with zero Start/Duration and
+		// IsFinal == false, so At(0) on it either misses (nothing written yet)
+		// or resolves nonsense that observeLatency ignores anyway since
+		// IsFinal is false — either way it's harmless.
+		if capturedAt, ok := idx.At(t.End()); ok {
+			t.CapturedAt = capturedAt
+		}
 		select {
 		case out <- t:
 		case <-ctx.Done():
@@ -489,34 +598,49 @@ func secondsToDuration(s float64) time.Duration {
 	return time.Duration(s * float64(time.Second))
 }
 
-// ring holds PCM frames while the connection is down or catching up,
-// dropping the oldest frame once full so a blip never backpressures capture.
+// chunk is one ring entry: PCM plus the wall time it was captured, which is
+// what latency is ultimately measured against.
+type chunk struct {
+	pcm        []byte
+	capturedAt time.Time
+}
+
+// ring holds PCM chunks while the connection is down or catching up,
+// dropping the oldest chunk once full so a blip never backpressures capture.
 type ring struct {
 	mu       sync.Mutex
-	frames   [][]byte
+	chunks   []chunk
 	bytes    int
 	capBytes int
 	met      *metrics.Metrics
+	gate     *stt.Gate
 
 	// notify wakes writeLoop when data arrives; buffered 1 and non-blocking
 	// to push so a slow or absent reader of it never stalls push.
 	notify chan struct{}
 }
 
-func newRing(capBytes int, met *metrics.Metrics) *ring {
-	return &ring{capBytes: capBytes, met: met, notify: make(chan struct{}, 1)}
+func newRing(capBytes int, met *metrics.Metrics, gate *stt.Gate) *ring {
+	return &ring{capBytes: capBytes, met: met, gate: gate, notify: make(chan struct{}, 1)}
 }
 
-func (r *ring) push(pcm []byte) {
+func (r *ring) push(f audio.Frame) {
 	r.mu.Lock()
-	r.frames = append(r.frames, pcm)
-	r.bytes += len(pcm)
-	for r.bytes > r.capBytes && len(r.frames) > 1 {
-		dropped := r.frames[0]
-		r.frames = r.frames[1:]
-		r.bytes -= len(dropped)
-		if r.met != nil {
-			r.met.DropFrame()
+	r.chunks = append(r.chunks, chunk{pcm: f.PCM, capturedAt: f.CapturedAt})
+	r.bytes += len(f.PCM)
+	for r.bytes > r.capBytes && len(r.chunks) > 1 {
+		dropped := r.chunks[0]
+		r.chunks = r.chunks[1:]
+		r.bytes -= len(dropped.pcm)
+		// While the gate is inactive, an eviction is the pre-roll buffer
+		// working as designed: we keep pushing silent frames so the ring
+		// always holds the most recent ~bufferAudio, and the oldest stale
+		// silence has to go somewhere. That's not degradation, so it stays
+		// uncounted. While the gate is active, though, evicting live audio
+		// means the link isn't draining fast enough to keep up — that IS
+		// worth flagging.
+		if r.met != nil && r.gate != nil && r.gate.Active() {
+			r.met.STTBufferDrop()
 		}
 	}
 	r.mu.Unlock()
@@ -527,20 +651,20 @@ func (r *ring) push(pcm []byte) {
 	}
 }
 
-func (r *ring) pop() ([]byte, bool) {
+func (r *ring) pop() (chunk, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.frames) == 0 {
-		return nil, false
+	if len(r.chunks) == 0 {
+		return chunk{}, false
 	}
-	f := r.frames[0]
-	r.frames = r.frames[1:]
-	r.bytes -= len(f)
-	return f, true
+	c := r.chunks[0]
+	r.chunks = r.chunks[1:]
+	r.bytes -= len(c.pcm)
+	return c, true
 }
 
 func (r *ring) empty() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.frames) == 0
+	return len(r.chunks) == 0
 }

@@ -19,3 +19,7 @@ Assume the user already has an instance running when you need one.
 - Static assets can be checked directly (`ffprobe` for the media in `internal/web/static/`).
 - Browser behaviour in `internal/web/static/index.html` cannot be verified from here. Say so and
   leave it to the user rather than starting a server to try.
+
+## Dev Work
+- Do not do work inside of worktrees in harness specific folders (eg: .claude/**), instead do all work in this local project directly
+- Do not create commits, wait for the user to review the changes

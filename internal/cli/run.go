@@ -66,6 +66,11 @@ func newSession(ctx context.Context, o buildOpts, term *ui.Terminal, log *slog.L
 
 	hub := caption.NewHub(met)
 
+	// Wired before anything starts so the very first SetSTTState call (idle ->
+	// connecting) already reaches the viewer. Hub.PublishStatus takes its own
+	// lock and never met's, so this can't deadlock against the metrics mutex.
+	met.SetSTTStateHook(func(s metrics.ConnState) { hub.PublishStatus(s.String(), "") })
+
 	engine, err := stt.New(o.stt.Engine, stt.Config{
 		Format:         audio.PipelineFormat,
 		Model:          o.stt.Model,
@@ -74,6 +79,11 @@ func newSession(ctx context.Context, o buildOpts, term *ui.Terminal, log *slog.L
 		Keyterms:       o.stt.Keyterm,
 		APIKey:         o.stt.APIKey,
 		Metrics:        met,
+		Pause: stt.PauseConfig{
+			Enabled:     o.stt.AutoPause,
+			ThresholdDB: o.stt.SilenceDB,
+			Hold:        o.stt.SilenceHold,
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -216,17 +226,16 @@ func (s *session) run(ctx context.Context, openBrowser bool, addr string) error 
 	return nil
 }
 
-// observeLatency records how far behind wall clock a finalized caption
-// arrived, measured against the media time it covers so replay and live are
-// comparable.
+// observeLatency records the wall-clock delay between the audio being captured
+// and the caption for it arriving. Anchoring on the frame's capture instant —
+// rather than on media time plus a stream origin — is what makes the figure
+// survive auto-pause, reconnects, dropped frames and ffmpeg restarts, all of
+// which move the recognizer's media clock relative to the wall.
 func (s *session) observeLatency(t stt.Transcript) {
-	if !t.IsFinal || t.ReceivedAt.IsZero() {
+	if !t.IsFinal || t.ReceivedAt.IsZero() || t.CapturedAt.IsZero() {
 		return
 	}
-	elapsed := t.ReceivedAt.Sub(s.met.StartedAt)
-	if d := elapsed - t.End(); d > 0 {
-		s.met.ObserveLatency(d)
-	}
+	s.met.ObserveLatency(t.ReceivedAt.Sub(t.CapturedAt))
 }
 
 // shutdown tears everything down and prints the summary. Called on the way out
@@ -283,7 +292,7 @@ func chunkDuration(ms int) (time.Duration, error) {
 // requireAPIKey fails early and clearly rather than letting the recognizer
 // return an opaque 401 after audio has started flowing.
 func requireAPIKey(engine, key string) error {
-	if engine == "mock" || strings.TrimSpace(key) != "" {
+	if strings.HasPrefix(engine, "mock") || strings.TrimSpace(key) != "" {
 		return nil
 	}
 	return errors.New("no Deepgram API key: set DEEPGRAM_API_KEY or pass --api-key " +

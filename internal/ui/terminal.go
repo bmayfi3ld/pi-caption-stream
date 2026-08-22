@@ -246,7 +246,7 @@ func renderStatus(t *Terminal, s metrics.Snapshot) string {
 	fmt.Fprintf(&b, "%d line%s", s.STT.Final, plural(s.STT.Final))
 
 	// Surface silent degradation right on the status line, not just /admin.
-	if drops := s.Source.FramesDropped + s.Monitor.FramesDropped + s.Web.SlowDrops; drops > 0 {
+	if drops := s.Source.FramesDropped + s.Monitor.FramesDropped + s.Web.SlowDrops + s.STT.BufferDrops; drops > 0 {
 		b.WriteString(t.c(ansiDim, " │ "))
 		b.WriteString(t.c(ansiYellow, fmt.Sprintf("%d drop%s", drops, plural(drops))))
 	}
@@ -267,6 +267,11 @@ func (t *Terminal) stateGlyph(state string, reconnects int64) string {
 		return t.c(ansiYellow, s)
 	case "closed":
 		return t.c(ansiRed, "✕ closed")
+	case "paused":
+		// Auto-pause closed the link on purpose to stop billing during
+		// silence — dim like idle, never amber/red, since this is not a
+		// fault.
+		return t.c(ansiDim, "⏸ paused (no audio)")
 	default:
 		return t.c(ansiDim, "· idle")
 	}

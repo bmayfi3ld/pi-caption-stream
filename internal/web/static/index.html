@@ -154,6 +154,13 @@
   #status.bad { background: color-mix(in srgb, var(--bad) 22%, transparent); padding: 0.3em 0.7em; }
   #status.bad .dot { background: var(--bad); box-shadow: none; }
   #status.bad .label { display: inline; color: var(--bad); }
+  /* Auto-pause: the recognizer link closed itself after a stretch of
+     silence, which is expected, money-saving behaviour, not a fault — so
+     this tier borrows --dim rather than --warn/--bad and must never read
+     as an error. */
+  #status.idle { background: color-mix(in srgb, var(--dim) 22%, transparent); padding: 0.3em 0.7em; }
+  #status.idle .dot { background: var(--dim); box-shadow: none; }
+  #status.idle .label { display: inline; color: var(--dim); }
 
   #debug {
     position: fixed;
@@ -641,10 +648,17 @@
     } else if (hubState === "closed") {
       tier = "bad";
       text = "closed";
+    } else if (hubState === "paused") {
+      // Auto-pause: the room went quiet and the recognizer link closed
+      // itself to stop billing. Correct, expected behaviour — "no audio"
+      // rather than an alarming word, and the dim dot carries the rest.
+      tier = "idle";
+      text = "no audio";
     }
     statusEl.classList.toggle("connecting", tier === "connecting");
     statusEl.classList.toggle("warn", tier === "warn");
     statusEl.classList.toggle("bad", tier === "bad");
+    statusEl.classList.toggle("idle", tier === "idle");
     statusLabel.textContent = text;
   }
 
@@ -666,6 +680,13 @@
         });
         applyUtterance(ev.pending || "", false, false);
         sseOpen = true;
+        // Replay the server's last-known state: a client that (re)connects
+        // mid-pause would otherwise sit on hubState's initial null and
+        // render a plain "ok" dot until something happens to change state
+        // again, which during a pause may be never. Absence of ev.state
+        // just means nothing has been published yet, not "back to ok" — so
+        // don't clobber a state this client already knows about.
+        if (ev.state) { hubState = ev.state; }
         break;
       case "final":
         applyUtterance(ev.text || "", true, true);

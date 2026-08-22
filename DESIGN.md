@@ -126,8 +126,9 @@ Engines self-register (`stt.Register`) and `main` blank-imports them, so adding 
 local whisper.cpp touches no existing file.
 
 `Transcript` carries `IsFinal` (text won't be revised), `SpeechFinal` (natural end of utterance),
-and media-time `Start`/`Duration` — timing in *media* time, not wall clock, so replay and live
-measure latency identically.
+media-time `Start`/`Duration` for ordering and display, and `CapturedAt`/`ReceivedAt` — the wall-clock
+pair latency is actually measured from (see section 6) — so replay and live measure latency
+identically regardless of `--speed`.
 
 `Run` owns its own reconnect logic: it returns only when the context is cancelled or frames run
 out, never on a dropped connection.
@@ -158,11 +159,57 @@ remaining results so the tail of a session isn't lost. On disconnect it reconnec
 backoff (250 ms → 8 s, jittered), holding ~2 s of audio in a bounded drop-oldest ring so a brief
 blip loses nothing.
 
+### Auto-pause
+
+Deepgram bills by streamed duration, and a quiet room — before doors open, over a long
+intermission, after the event ends but before someone remembers to Ctrl-C — streams silence at
+exactly the same rate as speech. Auto-pause (`internal/stt/gate.go`) closes the recognizer
+connection entirely during a confirmed stretch of silence and reopens it when audio returns, so
+dead air costs nothing.
+
+Silence is detected per frame as RMS level in dBFS, compared against `--silence-threshold-db`
+(default **-45**). A single quiet frame doesn't pause anything — the `Gate` requires the level to
+stay at or below the threshold for `--silence-hold` (default **60 s**) of *continuous media time*
+before flipping inactive, and resume is instant on the next frame that crosses back above
+threshold. Media time, not wall clock, is what `Observe` keys off (frame offsets, same as
+everywhere else in the pipeline) so a hold period behaves identically whether audio is arriving
+live or via `replay --speed 20`, and is deterministic in tests.
+
+The pause **closes the WebSocket**, it doesn't just stop writing to it. Deepgram does document
+`KeepAlive` as a way to hold a connection open without being charged for the idle time, so simply
+withholding audio would probably also avoid the bill — but "probably" is doing a lot of work in
+that sentence, and it stakes the cost of a long intermission on a provider's billing behaviour for
+a connection we're deliberately not using. A closed socket cannot be billed by anyone, needs no
+footnote, and doesn't change meaning if Deepgram's pricing does. Closing means a real reconnect
+(fresh handshake, fresh `Authorization`) when speech resumes.
+That reconnect is where the engine's existing ~2 s drop-oldest ring buffer (see Deepgram, above)
+earns a second job: it keeps filling from live frames while the connection is down, so by the time
+the redial completes there's already a couple of seconds of pre-roll queued to send, and the first
+word after silence isn't clipped waiting on handshake latency.
+
+`--auto-pause` / `--no-auto-pause` (default **on**) is the escape hatch for a venue where dead air
+is meaningful (e.g. captioning is expected to keep running through a scripted silence) or for
+debugging with a stable connection. `pauses_total` and `paused_sec` on `stt` in `/api/stats` (and
+therefore `/admin` and the status line) count how often and how long, so the savings — or a gate
+that's mistuned for a noisy room — are visible rather than inferred from a Deepgram invoice.
+
 ### Mock (`internal/stt/mock`)
 
 Emits canned phrases with realistic interim → final progression, driven entirely by media time from
 the frames — never wall clock — so output is identical at any `--speed` and reproducible in tests.
 This is what the web layer is developed against.
+
+### Mock-2 (`--engine mock-2`)
+
+`mock` never goes quiet — it's continuous canned speech — so it can't exercise auto-pause, and a
+real recording good enough to contain a genuine 60 s silence is an awkward thing to keep around
+just for that. `mock-2` solves this by driving the *real* `Gate` with a synthetic level schedule
+instead of real frame RMS: 20 s loud, then silent for the configured `--silence-hold` plus 20 s
+(so the hold is always reached and the paused state stays visible for a while, whichever hold is
+configured), repeating, still keyed off media time via `Gate.ObserveLevel`. Point `replay` at any
+file with `--engine mock-2` and the connection will pause and resume on a predictable cadence
+regardless of what the audio actually contains — enough to see the behavior end to end, and to
+write engine-level tests against it, without paying for a single second of real Deepgram usage.
 
 ---
 
@@ -211,7 +258,12 @@ Event wire format:
 {"seq":42,"kind":"final","id":"u17","text":"...","offset_ms":91230,"at":"2026-08-19T09:31:05Z"}
 {"seq":43,"kind":"interim","text":"partial words so far"}
 {"seq":44,"kind":"status","state":"reconnecting","detail":"stt websocket closed"}
+{"seq":45,"kind":"status","state":"paused","detail":""}
 ```
+
+`detail` is deliberately left empty for `paused`: the server reports *that* the state changed, but
+the wording shown for it ("no audio" on the viewer, "paused (no audio)" on `/admin`) is a
+presentation decision that belongs to each page, not something baked into the wire event.
 
 Pages are `//go:embed`-ed so the binary ships standalone; `--dev-static` serves from disk while
 iterating.
@@ -267,17 +319,51 @@ dropped 3 % of its audio must not look identical to a clean one.
 |---|---|
 | source | frames/bytes/seconds, `frames_dropped_total`, `ffmpeg_restarts_total`, `xruns_total`, `ffmpeg_last_stderr` |
 | monitor | `enabled`, `device`, `buffer_ms`, `alive`, `frames_dropped_total` |
-| stt | `state`, `reconnects_total`, `interim_total`, `final_total`, `bytes_sent_total`, `last_error`, latency last/p50/p95/max |
+| stt | `state` (now including `paused`), `reconnects_total`, `buffer_drops_total`, `pauses_total`, `paused_sec`, `interim_total`, `final_total`, `bytes_sent_total`, `last_error`, latency last/p50/p95/max |
 | web | `sse_clients`, `sse_clients_total`, `events_total`, `slow_disconnects_total` |
 | transcript | `path`, `lines_written`, `bytes_written`, `last_write_error` |
-| process | `version`, `session_id`, `started_at`, `uptime`, `goroutines` |
+| process | `version`, `session_id`, `started_at`, `uptime`, `goroutines`, `health` |
 
-**Latency** is `ReceivedAt − (streamStart + Start + Duration)`: how far behind wall clock the
-caption for a given piece of audio arrived. A 512-sample ring plus atomics; percentiles computed on
-read. No metrics library needed.
+`source.frames_dropped_total` no longer has a caller. It used to double as the counter for the
+Deepgram reconnect ring evicting buffered audio, but that's an STT-side event, not a source-side
+one, so it moved to `stt.buffer_drops_total` — and an eviction that happens while the gate is
+paused is the pre-roll buffer working as designed (see Auto-pause, above) and isn't counted at all
+any more. The field stays in `Source` as the slot for a genuine source-side drop, should ffmpeg or
+the capture backend ever need one; it just isn't the metric to watch for reconnect-driven loss —
+`stt.buffer_drops_total` is.
 
-`Snapshot.Clean()` reports whether every degradation counter is zero — that drives the amber
-highlighting in both the summary and `/admin`.
+**Latency** is `ReceivedAt − CapturedAt`: how far behind wall clock the caption for a given piece of
+audio arrived. `CapturedAt` is the wall-clock instant the audio was released into the pipeline
+(`audio.Frame.CapturedAt`), not a media-time offset from stream start — a per-connection
+`anchorIndex` (`internal/stt/deepgram/anchor.go`) maps the media-time `start`/`duration` Deepgram
+echoes back to that wall-clock instant, interpolating within the chunk it falls in. A stream-relative
+anchor (`streamStart + Start + Duration`) doesn't work here: auto-pause, reconnects, ring evictions
+and ffmpeg restarts all move the media clock relative to the wall, so on a long session with quiet
+stretches a stream-relative figure grew without bound instead of reporting real latency. Anchoring to
+the wall-clock capture instant sidesteps all of that. A 512-sample ring plus atomics; percentiles
+computed on read. No metrics library needed.
+
+See `specs/2026-08-20_analysis_caption_latency_measurement.md` for the full accuracy analysis
+this anchor came from — the anchor-bug findings there are fixed, but the ring's fixed size and
+non-decaying max, interim-latency measurement, and browser/ADC-side instrumentation are still
+open and are tracked there under "Remaining work."
+
+**`Snapshot.Health`** (`"closed"` / `"paused"` / `"degraded"` / `"ok"`) is the server-computed
+answer to "what is happening right now," and it's what `/admin`'s badge switches on — a closed or
+paused connection reports exactly that rather than a generic "degraded," and once the link is up
+again the badge recovers instead of latching at "degraded" for the rest of the session. A point
+event (a buffer drop, a reconnect) only holds `Health` at `"degraded"` for `degradedWindow` (60 s)
+after it happens, so a single blip from an hour ago doesn't flag the badge forever — that's the fix
+for the earlier permanently-latched "Degraded" state. The one asymmetry worth knowing: a standing
+transcript write error holds `Health` at `"degraded"` regardless of that window, because unlike a
+point event it's a condition, not something that happened once — it stays true for as long as
+writes are actually failing, and aging it out on the same timer would let the badge go green while
+the transcript diagnostic panel right below it is still showing a live error.
+
+**`Snapshot.Clean()`**, by contrast, answers "was this whole session clean": it reports whether
+every degradation counter was zero from start to finish, and never recovers once something has gone
+wrong, unlike `Health`. It's the cumulative counterpart to `Health`'s live snapshot — for a caller
+that wants a single end-of-session yes/no rather than the moment-to-moment picture.
 
 ---
 

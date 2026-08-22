@@ -126,6 +126,23 @@ func TestSummaryCleanSessionReportsZero(t *testing.T) {
 	}
 }
 
+// TestStateGlyphPausedIsNotAlarming covers the auto-pause status-line glyph:
+// the connection closed itself on purpose to save money during silence, so
+// it must render in the same dim family as idle, never the amber/red used
+// for actual reconnects and failures.
+func TestStateGlyphPausedIsNotAlarming(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	term := NewTerminal(Options{Out: &out, Err: &errBuf, TTY: true, Color: true})
+
+	got := term.stateGlyph("paused", 0)
+	if !strings.Contains(got, "paused") || !strings.Contains(got, "no audio") {
+		t.Errorf("stateGlyph(\"paused\") = %q, want text mentioning paused and no audio", got)
+	}
+	if strings.Contains(got, ansiYellow) || strings.Contains(got, ansiRed) {
+		t.Errorf("stateGlyph(\"paused\") = %q, must not use the warn/error colors", got)
+	}
+}
+
 // TestConcurrentCaptionAndLogDoNotInterleave exercises the single-mutex
 // ownership claim: many goroutines writing captions and logs at once must
 // never produce a line that mixes two writers' text. Run with -race.

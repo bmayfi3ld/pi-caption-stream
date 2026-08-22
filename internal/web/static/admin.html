@@ -12,6 +12,7 @@
     --border: #e2e4e9;
     --fg: #12151b;
     --muted: #6b7280;
+    --muted-soft: #6b728018;
     --accent: #0e7c86;
     --accent-soft: #0e7c8618;
     --ok: #1a9850;
@@ -29,6 +30,7 @@
       --border: #262a33;
       --fg: #eef0f3;
       --muted: #8a919e;
+      --muted-soft: #8a919e1a;
       --accent: #4fd3dd;
       --accent-soft: #4fd3dd1a;
       --ok: #3ecf7e;
@@ -41,13 +43,13 @@
   }
   :root[data-theme="dark"] {
     --bg: #0b0d11; --surface: #14171d; --surface-2: #191c23; --border: #262a33;
-    --fg: #eef0f3; --muted: #8a919e; --accent: #4fd3dd; --accent-soft: #4fd3dd1a;
+    --fg: #eef0f3; --muted: #8a919e; --muted-soft: #8a919e1a; --accent: #4fd3dd; --accent-soft: #4fd3dd1a;
     --ok: #3ecf7e; --ok-soft: #3ecf7e1c; --warn: #f5a623; --warn-soft: #f5a62324;
     --crit: #f16565; --crit-soft: #f165651f;
   }
   :root[data-theme="light"] {
     --bg: #f3f4f6; --surface: #ffffff; --surface-2: #f8f9fb; --border: #e2e4e9;
-    --fg: #12151b; --muted: #6b7280; --accent: #0e7c86; --accent-soft: #0e7c8618;
+    --fg: #12151b; --muted: #6b7280; --muted-soft: #6b728018; --accent: #0e7c86; --accent-soft: #0e7c8618;
     --ok: #1a9850; --ok-soft: #1a985018; --warn: #b8790a; --warn-soft: #f5a62328;
     --crit: #c22b2b; --crit-soft: #ef444428;
   }
@@ -81,6 +83,12 @@
   #health .dot { width: 0.55em; height: 0.55em; border-radius: 50%; }
   #health.ok { background: var(--ok-soft); color: var(--ok); }
   #health.ok .dot { background: var(--ok); }
+  /* Auto-pause is expected, money-saving behaviour, not a fault, so it gets
+     its own calm/dim tier rather than borrowing warn/crit — mirrors the
+     viewer's #status.idle pill in index.html, which draws the same
+     distinction so an intentional pause never reads as an error. */
+  #health.idle { background: var(--muted-soft); color: var(--muted); }
+  #health.idle .dot { background: var(--muted); }
   #health.warn { background: var(--warn-soft); color: var(--warn); }
   #health.warn .dot { background: var(--warn); }
   #health.crit { background: var(--crit-soft); color: var(--crit); }
@@ -184,7 +192,6 @@
     <div id="src-progress-wrap" style="display:none">
       <div class="progress"><i id="src-progress" style="width:0%"></i></div>
     </div>
-    <div class="row"><span class="k">Frames dropped</span><span class="v num" id="src-dropped">—</span></div>
     <div class="row"><span class="k">ffmpeg restarts</span><span class="v num" id="src-restarts">—</span></div>
     <div class="row"><span class="k">Xruns</span><span class="v num" id="src-xruns">—</span></div>
     <div class="diag err" id="src-stderr" style="display:none"></div>
@@ -205,6 +212,9 @@
     <div class="row"><span class="k">Interim / final</span><span class="v num" id="stt-counts">—</span></div>
     <div class="row"><span class="k">Audio sent</span><span class="v num" id="stt-sent">—</span></div>
     <div class="row"><span class="k">Reconnects</span><span class="v num" id="stt-reconnects">—</span></div>
+    <div class="row"><span class="k">Buffer drops</span><span class="v num" id="stt-buffer-drops">—</span></div>
+    <div class="row"><span class="k">Auto-pauses</span><span class="v num" id="stt-pauses">—</span></div>
+    <div class="row"><span class="k">Paused time</span><span class="v num" id="stt-paused-sec">—</span></div>
     <div class="diag err" id="stt-error" style="display:none"></div>
   </div>
 
@@ -238,15 +248,6 @@
 <script>
 (function () {
   "use strict";
-
-  var WARN_FIELDS = [
-    ["source", "frames_dropped_total"],
-    ["source", "ffmpeg_restarts_total"],
-    ["source", "xruns_total"],
-    ["monitor", "frames_dropped_total"],
-    ["stt", "reconnects_total"],
-    ["web", "slow_disconnects_total"],
-  ];
 
   function fmtInt(n) {
     if (typeof n !== "number" || isNaN(n)) return "—";
@@ -344,27 +345,31 @@
       '<circle cx="' + last[0].toFixed(1) + '" cy="' + last[1].toFixed(1) + '" r="2.6" fill="' + accent + '"></circle>';
   }
 
-  function getPath(obj, path) {
-    return path.split(".").reduce(function (o, k) { return o && (k in o) ? o[k] : undefined; }, obj);
-  }
-
   function render(s) {
     document.getElementById("offline").classList.remove("show");
 
     // ---- health ----
-    var warnCount = WARN_FIELDS.reduce(function (acc, f) {
-      var v = getPath(s, f[0] + "." + f[1]);
-      return acc + (typeof v === "number" && v !== 0 ? 1 : 0);
-    }, 0);
-    var transcriptErr = s.transcript && s.transcript.last_write_error;
+    // The server resolves current state (metrics.Metrics.Snapshot) so the
+    // status line, /admin and the shutdown summary can never disagree; this
+    // just maps that verdict onto the badge. See internal/metrics/metrics.go.
     var healthEl = document.getElementById("health");
     var healthLabel = document.getElementById("health-label");
-    if (warnCount === 0 && !transcriptErr) {
-      healthEl.className = "ok";
-      healthLabel.textContent = "Clean";
-    } else {
-      healthEl.className = "warn";
-      healthLabel.textContent = "Degraded";
+    switch (s.health) {
+      case "paused":
+        healthEl.className = "idle";
+        healthLabel.textContent = "STT Paused";
+        break;
+      case "degraded":
+        healthEl.className = "warn";
+        healthLabel.textContent = "Degraded";
+        break;
+      case "closed":
+        healthEl.className = "crit";
+        healthLabel.textContent = "Closed";
+        break;
+      default:
+        healthEl.className = "ok";
+        healthLabel.textContent = "Clean";
     }
 
     setText("m-uptime", fmtDuration(s.uptime_sec));
@@ -401,7 +406,6 @@
       setText("src-seconds", fmtClock(src.seconds_total));
       document.getElementById("src-progress-wrap").style.display = "none";
     }
-    setChip("src-dropped", src.frames_dropped_total, true);
     setChip("src-restarts", src.ffmpeg_restarts_total, true);
     setChip("src-xruns", src.xruns_total, true);
     setDiag("src-stderr", src.ffmpeg_last_stderr || "");
@@ -421,10 +425,21 @@
 
     // ---- stt ----
     setText("stt-engine", stt.engine || "—");
-    setText("stt-state", stt.state || "—");
+    // "paused" gets the fuller phrasing here — the admin page has room for
+    // it, unlike the width-constrained viewer pill.
+    setText("stt-state", stt.state === "paused" ? "paused (no audio)" : (stt.state || "—"));
     setText("stt-counts", fmtInt(stt.interim_total) + " / " + fmtInt(stt.final_total));
-    setText("stt-sent", fmtBytes(stt.bytes_sent_total));
+    // A frozen counter while paused is correct, not a dead metric: the
+    // engine (mock and deepgram alike) sends nothing to consume while the
+    // gate holds, so the suffix confirms it, matching the phrasing used for
+    // stt-state above rather than flagging amber like the counters below.
+    setText("stt-sent", fmtBytes(stt.bytes_sent_total) + (stt.state === "paused" ? " (paused)" : ""));
     setChip("stt-reconnects", stt.reconnects_total, true);
+    setChip("stt-buffer-drops", stt.buffer_drops_total, true);
+    // setText, not setChip: an auto-pause is correct, money-saving behaviour,
+    // not silent degradation, so it must not flag amber like the counters above.
+    setText("stt-pauses", fmtInt(stt.pauses_total));
+    setText("stt-paused-sec", fmtDuration(stt.paused_sec));
     var sttErrText = stt.last_error ? stt.last_error + (stt.last_error_at ? "  (" + stt.last_error_at + ")" : "") : "";
     setDiag("stt-error", sttErrText);
 

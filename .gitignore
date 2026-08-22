@@ -1,4 +1,7 @@
 replays/*
 transcripts/*
 .env
-logo.png
+# Anchored: this is the event logo dropped in the repo root, not every file
+# named logo.png. Unanchored, it also swallowed internal/web/testdata/logo.png
+# and the web tests failed on any fresh clone.
+/logo.png
